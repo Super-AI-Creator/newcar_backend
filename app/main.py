@@ -14,6 +14,8 @@ app = FastAPI(title="NewCarSuperstore App Backend")
 _cors_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://newcar-frontend.vercel.app",
+    "http://newcar-frontend.vercel.app",
 ]
 _extra = os.getenv("CORS_ORIGINS", "").strip()
 if _extra:
