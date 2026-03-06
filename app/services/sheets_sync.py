@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from google.oauth2 import service_account
@@ -60,10 +63,45 @@ def _canonical_header(value: str) -> str:
 
 
 def _get_sheets_service():
-    creds = service_account.Credentials.from_service_account_file(
-        settings.google_service_account_json, scopes=SCOPES
-    )
+    raw = (settings.google_service_account_json or "").strip()
+    if not raw:
+        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not set.")
+
+    # Local/dev can use a filesystem path. Cloud deploys (e.g., Vercel) should use inline JSON or base64 JSON.
+    candidate_path = Path(raw.strip("\"'")).expanduser()
+    if candidate_path.exists():
+        creds = service_account.Credentials.from_service_account_file(str(candidate_path), scopes=SCOPES)
+    else:
+        creds = service_account.Credentials.from_service_account_info(
+            _parse_service_account_info(raw),
+            scopes=SCOPES,
+        )
+
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+
+def _parse_service_account_info(raw: str) -> dict:
+    # 1) Raw JSON string
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    # 2) Base64-encoded JSON string
+    try:
+        decoded = base64.b64decode(raw).decode("utf-8")
+        parsed = json.loads(decoded)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    raise RuntimeError(
+        "GOOGLE_SERVICE_ACCOUNT_JSON must be either: "
+        "(a) existing file path, (b) raw JSON object string, or (c) base64-encoded JSON object."
+    )
 
 
 def _hash_rows(rows: List[List[str]]) -> str:
