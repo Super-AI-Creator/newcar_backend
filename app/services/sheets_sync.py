@@ -67,20 +67,25 @@ def _get_sheets_service():
     if not raw:
         raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not set.")
 
-    # Local/dev can use a filesystem path. Cloud deploys (e.g., Vercel) should use inline JSON or base64 JSON.
-    candidate_path = Path(raw.strip("\"'")).expanduser()
-    if candidate_path.exists():
-        creds = service_account.Credentials.from_service_account_file(str(candidate_path), scopes=SCOPES)
+    normalized = raw.strip("\"'")
+
+    # Prefer inline JSON/base64 first; only then attempt filesystem path.
+    info = _parse_service_account_info(normalized)
+    if info is not None:
+        creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
     else:
-        creds = service_account.Credentials.from_service_account_info(
-            _parse_service_account_info(raw),
-            scopes=SCOPES,
-        )
+        candidate_path = _safe_existing_path(normalized)
+        if not candidate_path:
+            raise RuntimeError(
+                "GOOGLE_SERVICE_ACCOUNT_JSON must be either: "
+                "(a) existing file path, (b) raw JSON object string, or (c) base64-encoded JSON object."
+            )
+        creds = service_account.Credentials.from_service_account_file(str(candidate_path), scopes=SCOPES)
 
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
-def _parse_service_account_info(raw: str) -> dict:
+def _parse_service_account_info(raw: str) -> Optional[dict]:
     # 1) Raw JSON string
     try:
         parsed = json.loads(raw)
@@ -91,17 +96,27 @@ def _parse_service_account_info(raw: str) -> dict:
 
     # 2) Base64-encoded JSON string
     try:
-        decoded = base64.b64decode(raw).decode("utf-8")
+        compact = "".join(raw.split())
+        padded = compact + ("=" * (-len(compact) % 4))
+        decoded = base64.b64decode(padded, validate=True).decode("utf-8")
         parsed = json.loads(decoded)
         if isinstance(parsed, dict):
             return parsed
     except Exception:
         pass
 
-    raise RuntimeError(
-        "GOOGLE_SERVICE_ACCOUNT_JSON must be either: "
-        "(a) existing file path, (b) raw JSON object string, or (c) base64-encoded JSON object."
-    )
+    return None
+
+
+def _safe_existing_path(raw: str) -> Optional[Path]:
+    try:
+        candidate_path = Path(raw).expanduser()
+        if candidate_path.exists():
+            return candidate_path
+    except OSError:
+        # Inputs like long base64 blobs are not valid file names.
+        return None
+    return None
 
 
 def _hash_rows(rows: List[List[str]]) -> str:
