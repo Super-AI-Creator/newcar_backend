@@ -74,11 +74,27 @@ def _sync_sheets(db: Session):
     if not (db and engine):
         raise HTTPException(status_code=500, detail="Database not ready")
 
-    offers_count, offers_hash = sync_offers(db)
-    scores_count, scores_hash = sync_scores(db)
+    offers_count = 0
+    offers_hash = None
+    offers_error = None
+    try:
+        offers_count, offers_hash = sync_offers(db)
+    except Exception as exc:
+        offers_error = str(exc)
+
+    scores_count = 0
+    scores_hash = None
+    scores_error = None
+    try:
+        scores_count, scores_hash = sync_scores(db)
+    except Exception as exc:
+        scores_error = str(exc)
+
+    ok = (offers_error is None) and (scores_error is None)
     return {
-        "offers": {"count": offers_count, "hash": offers_hash},
-        "scores": {"count": scores_count, "hash": scores_hash},
+        "ok": ok,
+        "offers": {"count": offers_count, "hash": offers_hash, "error": offers_error},
+        "scores": {"count": scores_count, "hash": scores_hash, "error": scores_error},
     }
 
 
