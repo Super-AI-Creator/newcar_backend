@@ -7,7 +7,7 @@ from app.core.security import decode_token
 from app.models.user import User
 
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
 def get_db():
@@ -22,15 +22,40 @@ def get_current_user(
     creds: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
-    payload = decode_token(creds.credentials)
+    if creds is None or not creds.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Login to continue",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    try:
+        payload = decode_token(creds.credentials)
+    except HTTPException:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Login to continue",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     if payload.get("type") != "access":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Login to continue",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     email = payload.get("sub")
     if not email:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token subject")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Login to continue",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     user = db.query(User).filter(User.email == email).first()
     if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Login to continue",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return user
 
 

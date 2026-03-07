@@ -12,6 +12,7 @@ from app.models.testimonial import Testimonial
 from app.models.deal import Deal
 from app.models.lender_rate import LenderRate
 from app.models.deal_event import DealEvent
+from app.models.lead_request import LeadRequest
 
 __all__ = [
     "Base",
@@ -28,4 +29,5 @@ __all__ = [
     "Deal",
     "LenderRate",
     "DealEvent",
+    "LeadRequest",
 ]

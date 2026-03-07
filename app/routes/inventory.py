@@ -15,12 +15,16 @@ from app.models.offer_override import OfferOverride
 from app.models.user import User
 from app.schemas.inventory import InventoryItem, InventorySearchResponse, OfferOverrideOut, ModelScoreOut
 from app.services.legacy_tables import build_inventory_count_query, build_inventory_query, serialize_photos
+from app.services.make_normalization import canonicalize_make
 from app.services.offers import apply_offer_visibility
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 _SEARCH_CACHE: dict[str, tuple[float, dict]] = {}
 _SEARCH_CACHE_TTL_SECONDS = 12.0
 _SEARCH_CACHE_MAX_ENTRIES = 256
+_FILTERS_CACHE: dict[str, tuple[float, dict]] = {}
+_FILTERS_CACHE_TTL_SECONDS = 30.0
+_FILTERS_CACHE_MAX_ENTRIES = 64
 
 
 def _serialize_details(raw):
@@ -136,6 +140,84 @@ def _cache_set(key: str, payload: dict):
         if len(_SEARCH_CACHE) > _SEARCH_CACHE_MAX_ENTRIES:
             oldest_key = min(_SEARCH_CACHE.items(), key=lambda item: item[1][0])[0]
             _SEARCH_CACHE.pop(oldest_key, None)
+
+
+def _filters_cache_get(key: str):
+    now = time.time()
+    cached = _FILTERS_CACHE.get(key)
+    if not cached:
+        return None
+    expires_at, payload = cached
+    if now >= expires_at:
+        _FILTERS_CACHE.pop(key, None)
+        return None
+    return payload
+
+
+def _filters_cache_set(key: str, payload: dict):
+    now = time.time()
+    _FILTERS_CACHE[key] = (now + _FILTERS_CACHE_TTL_SECONDS, payload)
+    if len(_FILTERS_CACHE) > _FILTERS_CACHE_MAX_ENTRIES:
+        expired_keys = [k for k, (expires_at, _) in _FILTERS_CACHE.items() if expires_at <= now]
+        for k in expired_keys:
+            _FILTERS_CACHE.pop(k, None)
+        if len(_FILTERS_CACHE) > _FILTERS_CACHE_MAX_ENTRIES:
+            oldest_key = min(_FILTERS_CACHE.items(), key=lambda item: item[1][0])[0]
+            _FILTERS_CACHE.pop(oldest_key, None)
+
+
+@router.get("/filters")
+def inventory_filters(
+    vehicle_type: str = Query("all", pattern="^(new|used|all)$"),
+    offers_only: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    cache_key = f"vehicle_type={vehicle_type}|offers_only={offers_only}"
+    cached = _filters_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    base_query = build_inventory_query(engine, {"vehicle_type": vehicle_type})
+    base = base_query.subquery()
+    stmt = (
+        select(base.c.make, base.c.model, base.c.trim)
+        .where(base.c.make.is_not(None), base.c.model.is_not(None))
+        .distinct()
+    )
+    if offers_only:
+        stmt = stmt.where(base.c.vin.in_(select(OfferOverride.vin)))
+
+    rows = db.execute(stmt).fetchall()
+    models_by_make: dict[str, set[str]] = {}
+    trims_by_make_model: dict[str, set[str]] = {}
+    makes_set: set[str] = set()
+
+    for make_value, model_value, trim_value in rows:
+        make_key = canonicalize_make(str(make_value)) if make_value is not None else None
+        model_key = str(model_value).strip() if model_value is not None else ""
+        if not make_key or not model_key:
+            continue
+        makes_set.add(make_key)
+        models_by_make.setdefault(make_key, set()).add(model_key)
+        if trim_value is not None and str(trim_value).strip():
+            combo_key = f"{make_key}|||{model_key}"
+            trims_by_make_model.setdefault(combo_key, set()).add(str(trim_value).strip())
+
+    makes = sorted(makes_set)
+    models_by_make_sorted = {key: sorted(values) for key, values in models_by_make.items()}
+    trims_by_make_model_sorted = {key: sorted(values) for key, values in trims_by_make_model.items()}
+    models = sorted({model for values in models_by_make_sorted.values() for model in values})
+    trims = sorted({trim for values in trims_by_make_model_sorted.values() for trim in values})
+
+    payload = {
+        "makes": makes,
+        "models": models,
+        "trims": trims,
+        "models_by_make": models_by_make_sorted,
+        "trims_by_make_model": trims_by_make_model_sorted,
+    }
+    _filters_cache_set(cache_key, payload)
+    return payload
 
 
 @router.get("/search", response_model=InventorySearchResponse, response_model_exclude_none=True)

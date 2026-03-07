@@ -1,4 +1,4 @@
-from app.routes import auth, inventory, favorites, broker, credit, docs, admin, dealer, payments, recommendations, vehicles, search_compat, frontend_compat, testimonials, deals, lenders
+from app.routes import auth, inventory, favorites, broker, credit, docs, admin, dealer, payments, recommendations, vehicles, search_compat, frontend_compat, testimonials, deals, lenders, leads
 
 __all__ = [
     "auth",
@@ -17,4 +17,5 @@ __all__ = [
     "testimonials",
     "deals",
     "lenders",
+    "leads",
 ]

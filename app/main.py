@@ -1,12 +1,13 @@
 import os
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import OperationalError
 
 from app.core.deps import get_current_user
-from app.routes import auth, inventory, favorites, broker, credit, docs, admin, dealer, payments, recommendations, vehicles, search_compat, frontend_compat, testimonials, deals, lenders
+from app.routes import auth, inventory, favorites, broker, credit, docs, admin, dealer, payments, recommendations, vehicles, search_compat, frontend_compat, testimonials, deals, lenders, leads
 from app.schemas.user import UserOut
 
 app = FastAPI(title="NewCarSuperstore App Backend")
@@ -46,6 +47,21 @@ async def handle_db_operational_error(_, exc: OperationalError):
     return JSONResponse(status_code=500, content={"detail": "Database operation failed."})
 
 
+@app.exception_handler(HTTPException)
+async def handle_http_exception(request: Request, exc: HTTPException):
+    detail_text = str(exc.detail or "").strip().lower()
+    if exc.status_code == 401 and detail_text == "not authenticated":
+        headers = dict(getattr(exc, "headers", {}) or {})
+        if "WWW-Authenticate" not in headers:
+            headers["WWW-Authenticate"] = "Bearer"
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Login to continue"},
+            headers=headers,
+        )
+    return await http_exception_handler(request, exc)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -72,3 +88,4 @@ app.include_router(frontend_compat.router)
 app.include_router(testimonials.router)
 app.include_router(deals.router)
 app.include_router(lenders.router)
+app.include_router(leads.router)
