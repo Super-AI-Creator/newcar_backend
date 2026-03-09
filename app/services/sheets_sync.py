@@ -9,6 +9,7 @@ from typing import List, Optional, Tuple
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 import httplib2
 from google_auth_httplib2 import AuthorizedHttp
 from sqlalchemy.dialects.mysql import insert as mysql_insert
@@ -135,18 +136,166 @@ def _hash_rows(rows: List[List[str]]) -> str:
 
 def _fetch_sheet(sheet_id: str, tab: str) -> List[List[str]]:
     service = _get_sheets_service()
-    result = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=tab).execute()
-    return result.get("values", [])
+    range_candidates = []
+    normalized_tab = str(tab or "").strip()
+    if normalized_tab:
+        range_candidates.append(normalized_tab)
+        range_candidates.append(_quote_sheet_tab_for_a1(normalized_tab))
+
+    last_parse_error: Optional[Exception] = None
+    for range_name in _unique_in_order(range_candidates):
+        try:
+            result = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=range_name).execute()
+            return result.get("values", [])
+        except HttpError as exc:
+            if _is_unparseable_range_error(exc):
+                last_parse_error = exc
+                continue
+            raise
+
+    titles = _list_sheet_titles(service, sheet_id)
+    matched_title = _match_sheet_title(normalized_tab, titles)
+    if matched_title:
+        quoted = _quote_sheet_tab_for_a1(matched_title)
+        result = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=quoted).execute()
+        return result.get("values", [])
+
+    available = ", ".join(titles) if titles else "(none returned)"
+    if last_parse_error is not None:
+        raise RuntimeError(
+            f"Sheet tab '{normalized_tab}' is invalid or not found in spreadsheet {sheet_id}. "
+            f"Available tabs: {available}"
+        ) from last_parse_error
+    raise RuntimeError(
+        f"Sheet tab '{normalized_tab}' is not found in spreadsheet {sheet_id}. "
+        f"Available tabs: {available}"
+    )
+
+
+def _quote_sheet_tab_for_a1(tab_name: str) -> str:
+    escaped = str(tab_name or "").replace("'", "''")
+    return f"'{escaped}'"
+
+
+def _list_sheet_titles(service, sheet_id: str) -> List[str]:
+    response = service.spreadsheets().get(
+        spreadsheetId=sheet_id,
+        fields="sheets.properties.title",
+    ).execute()
+    sheets = response.get("sheets", []) if isinstance(response, dict) else []
+    titles: List[str] = []
+    for item in sheets:
+        props = item.get("properties", {}) if isinstance(item, dict) else {}
+        title = str(props.get("title") or "").strip()
+        if title:
+            titles.append(title)
+    return titles
+
+
+def _normalize_sheet_title(value: str) -> str:
+    text = str(value or "").strip().lower()
+    text = text.replace("_", " ")
+    return " ".join(text.split())
+
+
+def _match_sheet_title(requested: str, titles: List[str]) -> Optional[str]:
+    requested_norm = _normalize_sheet_title(requested)
+    if not requested_norm:
+        return None
+    for title in titles:
+        if _normalize_sheet_title(title) == requested_norm:
+            return title
+    return None
+
+
+def _is_unparseable_range_error(exc: HttpError) -> bool:
+    text = str(exc)
+    return "Unable to parse range" in text
+
+
+def _unique_in_order(items: List[str]) -> List[str]:
+    seen = set()
+    result: List[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _resolve_sheet_target(
+    *,
+    primary_id: Optional[str],
+    primary_tab: Optional[str],
+    primary_label: str,
+    fallback_id: Optional[str] = None,
+    fallback_tab: Optional[str] = None,
+    fallback_label: Optional[str] = None,
+) -> Tuple[str, str]:
+    resolved_primary_id = (primary_id or "").strip()
+    resolved_primary_tab = (primary_tab or "").strip()
+    if resolved_primary_id and resolved_primary_tab:
+        return resolved_primary_id, resolved_primary_tab
+    if resolved_primary_id or resolved_primary_tab:
+        raise RuntimeError(
+            f"{primary_label} sheet config is incomplete. "
+            f"Set both ID and tab for {primary_label}."
+        )
+
+    resolved_fallback_id = (fallback_id or "").strip()
+    resolved_fallback_tab = (fallback_tab or "").strip()
+    if fallback_label and resolved_fallback_id and resolved_fallback_tab:
+        return resolved_fallback_id, resolved_fallback_tab
+    if fallback_label and (resolved_fallback_id or resolved_fallback_tab):
+        raise RuntimeError(
+            f"{fallback_label} sheet fallback config is incomplete. "
+            f"Set both ID and tab for {fallback_label}."
+        )
+
+    if fallback_label:
+        raise RuntimeError(
+            f"{primary_label} sheet config is missing. "
+            f"Set {primary_label} config or provide {fallback_label} config as fallback."
+        )
+    raise RuntimeError(f"{primary_label} sheet config is missing.")
+
+
+def resolve_offers_sheet_target() -> Tuple[str, str]:
+    return _resolve_sheet_target(
+        primary_id=settings.offers_sheet_id,
+        primary_tab=settings.offers_sheet_tab,
+        primary_label="offers",
+    )
+
+
+def resolve_scores_sheet_target() -> Tuple[str, str]:
+    return _resolve_sheet_target(
+        primary_id=settings.scores_sheet_id,
+        primary_tab=settings.scores_sheet_tab,
+        primary_label="scores",
+        fallback_id=settings.offers_sheet_id,
+        fallback_tab=settings.offers_sheet_tab,
+        fallback_label="offers",
+    )
+
+
+def compute_sheet_data_hash(sheet_id: str, tab: str) -> str:
+    rows = _fetch_sheet(sheet_id, tab)
+    if not rows:
+        return "no rows"
+    return _hash_rows(rows)
 
 
 def sync_offers(db: Session) -> Tuple[int, str]:
-    rows = _fetch_sheet(settings.offers_sheet_id, settings.offers_sheet_tab)
+    offers_sheet_id, offers_sheet_tab = resolve_offers_sheet_target()
+    rows = _fetch_sheet(offers_sheet_id, offers_sheet_tab)
     if not rows:
         return 0, "no rows"
 
     header = [_canonical_header(h) for h in rows[0]]
     data_rows = rows[1:]
-    row_hash = _hash_rows(data_rows)
+    row_hash = _hash_rows(rows)
     inventory_index = _build_inventory_index(db)
 
     resolved_by_vin: dict[str, tuple[Optional[float], Optional[float], Optional[float], Optional[int], Optional[int]]] = {}
@@ -202,7 +351,7 @@ def sync_offers(db: Session) -> Tuple[int, str]:
     _bulk_upsert_offer_overrides(db, payload_rows)
     count = len(payload_rows)
 
-    _upsert_meta(db, "offers", settings.offers_sheet_id, settings.offers_sheet_tab, row_hash, None)
+    _upsert_meta(db, "offers", offers_sheet_id, offers_sheet_tab, row_hash, None)
     db.commit()
     return count, row_hash
 
@@ -281,13 +430,14 @@ def _bulk_upsert_offer_overrides(db: Session, rows: list[dict]) -> None:
 
 
 def sync_scores(db: Session) -> Tuple[int, str]:
-    rows = _fetch_sheet(settings.scores_sheet_id, settings.scores_sheet_tab)
+    scores_sheet_id, scores_sheet_tab = resolve_scores_sheet_target()
+    rows = _fetch_sheet(scores_sheet_id, scores_sheet_tab)
     if not rows:
         return 0, "no rows"
 
     header = [_canonical_header(h) for h in rows[0]]
     data_rows = rows[1:]
-    row_hash = _hash_rows(data_rows)
+    row_hash = _hash_rows(rows)
 
     parsed_rows: list[tuple[str, str, Optional[str], Optional[int], int, int, int, int, int]] = []
     for row in data_rows:
@@ -339,7 +489,7 @@ def sync_scores(db: Session) -> Tuple[int, str]:
 
     count = len(parsed_rows)
 
-    _upsert_meta(db, "scores", settings.scores_sheet_id, settings.scores_sheet_tab, row_hash, None)
+    _upsert_meta(db, "scores", scores_sheet_id, scores_sheet_tab, row_hash, None)
     db.commit()
     return count, row_hash
 

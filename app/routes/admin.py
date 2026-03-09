@@ -13,7 +13,7 @@ from app.models.model_score import ModelScore
 from app.models.sheet_sources_meta import SheetSourceMeta
 from app.services.offers import set_offer_visibility
 from app.services.legacy_tables import build_inventory_query, load_legacy_tables
-from app.services.sheets_sync import sync_offers, sync_scores
+from app.services.sheets_runner import run_sheets_sync
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -73,29 +73,7 @@ def sync_status(db: Session = Depends(get_db), user=Depends(require_role("broker
 def _sync_sheets(db: Session):
     if not (db and engine):
         raise HTTPException(status_code=500, detail="Database not ready")
-
-    offers_count = 0
-    offers_hash = None
-    offers_error = None
-    try:
-        offers_count, offers_hash = sync_offers(db)
-    except Exception as exc:
-        offers_error = str(exc)
-
-    scores_count = 0
-    scores_hash = None
-    scores_error = None
-    try:
-        scores_count, scores_hash = sync_scores(db)
-    except Exception as exc:
-        scores_error = str(exc)
-
-    ok = (offers_error is None) and (scores_error is None)
-    return {
-        "ok": ok,
-        "offers": {"count": offers_count, "hash": offers_hash, "error": offers_error},
-        "scores": {"count": scores_count, "hash": scores_hash, "error": scores_error},
-    }
+    return run_sheets_sync(db)
 
 
 class OfferOverrideUpdate(BaseModel):

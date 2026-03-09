@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     offers_sheet_tab: Optional[str] = Field(None)
     scores_sheet_id: Optional[str] = Field(None)
     scores_sheet_tab: Optional[str] = Field(None)
+    sheets_auto_sync_enabled: bool = Field(False)
+    sheets_auto_sync_interval_minutes: int = Field(10)
+    sheets_auto_sync_run_on_startup: bool = Field(True)
+    sheets_webhook_secret: Optional[str] = Field(None)
+    sheets_webhook_lock_wait_seconds: int = Field(2)
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 

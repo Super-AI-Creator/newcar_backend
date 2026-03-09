@@ -7,10 +7,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import OperationalError
 
 from app.core.deps import get_current_user
-from app.routes import auth, inventory, favorites, broker, credit, docs, admin, dealer, payments, recommendations, vehicles, search_compat, frontend_compat, testimonials, deals, lenders, leads
+from app.routes import auth, inventory, favorites, broker, credit, docs, admin, dealer, payments, recommendations, vehicles, search_compat, frontend_compat, testimonials, deals, lenders, leads, webhooks
 from app.schemas.user import UserOut
+from app.services.sheets_scheduler import SheetsSyncScheduler
 
 app = FastAPI(title="NewCarSuperstore App Backend")
+_sheets_scheduler = SheetsSyncScheduler()
 
 _cors_origins = [
     "http://localhost:3000",
@@ -67,6 +69,16 @@ def health():
     return {"status": "ok"}
 
 
+@app.on_event("startup")
+def start_background_jobs():
+    _sheets_scheduler.start()
+
+
+@app.on_event("shutdown")
+def stop_background_jobs():
+    _sheets_scheduler.stop()
+
+
 @app.get("/me", response_model=UserOut)
 def me(user=Depends(get_current_user)):
     return user
@@ -89,3 +101,4 @@ app.include_router(testimonials.router)
 app.include_router(deals.router)
 app.include_router(lenders.router)
 app.include_router(leads.router)
+app.include_router(webhooks.router)
