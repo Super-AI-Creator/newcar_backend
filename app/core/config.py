@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     sheets_auto_sync_run_on_startup: bool = Field(True)
     sheets_webhook_secret: Optional[str] = Field(None)
     sheets_webhook_lock_wait_seconds: int = Field(2)
+    lead_webhook_url: Optional[str] = Field(None)
+    lead_webhook_secret: Optional[str] = Field(None)
+    lead_webhook_timeout_seconds: int = Field(10)
+    lead_webhook_max_attempts: int = Field(3)
+    lead_webhook_retry_backoff_seconds: float = Field(1.0)
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 

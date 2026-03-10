@@ -12,6 +12,9 @@ from app.core.config import settings
 _MYSQL_RETRYABLE_CODES = {1040, 1203}
 _MYSQL_CONNECT_RETRIES = 6
 _MYSQL_RETRY_DELAY_SEC = 2
+_MYSQL_RETRYABLE_INTERNAL_MESSAGES = {
+    "packet sequence number wrong",
+}
 
 
 def _select_mysql_driver() -> str:
@@ -58,10 +61,12 @@ def _connect_with_retry():
                 read_timeout=30,
                 write_timeout=30,
             )
-        except pymysql.err.OperationalError as e:
+        except (pymysql.err.OperationalError, pymysql.err.InternalError) as e:
             last_err = e
             code = e.args[0] if e.args else None
-            if code in _MYSQL_RETRYABLE_CODES and attempt < _MYSQL_CONNECT_RETRIES - 1:
+            message = " ".join(str(part) for part in e.args).lower()
+            retryable_internal = any(text in message for text in _MYSQL_RETRYABLE_INTERNAL_MESSAGES)
+            if (code in _MYSQL_RETRYABLE_CODES or retryable_internal) and attempt < _MYSQL_CONNECT_RETRIES - 1:
                 time.sleep(_MYSQL_RETRY_DELAY_SEC * (attempt + 1))
                 continue
             raise

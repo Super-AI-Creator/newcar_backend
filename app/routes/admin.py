@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -8,10 +8,12 @@ from sqlalchemy.orm import Session
 from app.core.database import engine
 from app.core.deps import get_db, require_role
 from app.models.enums import OfferSource
+from app.models.lead_request import LeadRequest
 from app.models.offer_override import OfferOverride
 from app.models.model_score import ModelScore
 from app.models.sheet_sources_meta import SheetSourceMeta
 from app.services.offers import set_offer_visibility
+from app.services.lead_delivery import build_lead_webhook_payload, is_lead_webhook_enabled, send_lead_webhook
 from app.services.legacy_tables import build_inventory_query, load_legacy_tables
 from app.services.sheets_runner import run_sheets_sync
 
@@ -68,6 +70,72 @@ def sync_status(db: Session = Depends(get_db), user=Depends(require_role("broker
             "model_scores": db.query(func.count(ModelScore.id)).scalar() or 0,
         },
     }
+
+
+@router.get("/lead-delivery")
+def lead_delivery_logs(
+    status: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    user=Depends(require_role("broker_admin")),
+):
+    query = db.query(LeadRequest)
+    if status in {"pending", "sent", "failed", "skipped"}:
+        query = query.filter(LeadRequest.webhook_status == status)
+    if q:
+        needle = q.strip()
+        if needle:
+            query = query.filter(
+                (LeadRequest.email.ilike(f"%{needle}%"))
+                | (LeadRequest.phone.ilike(f"%{needle}%"))
+                | (LeadRequest.vin.ilike(f"%{needle}%"))
+                | (LeadRequest.name.ilike(f"%{needle}%"))
+            )
+
+    rows = query.order_by(LeadRequest.created_at.desc()).limit(limit).all()
+    return {
+        "items": [
+            {
+                "lead_id": int(row.id),
+                "created_at": str(row.created_at) if row.created_at else None,
+                "name": row.name,
+                "email": row.email,
+                "phone": row.phone,
+                "vin": row.vin,
+                "source": row.source,
+                "webhook_status": row.webhook_status,
+                "webhook_attempts": int(row.webhook_attempts or 0),
+                "webhook_last_error": row.webhook_last_error,
+                "webhook_last_attempt_at": str(row.webhook_last_attempt_at) if row.webhook_last_attempt_at else None,
+                "webhook_delivered_at": str(row.webhook_delivered_at) if row.webhook_delivered_at else None,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.post("/lead-delivery/{lead_id}/retry")
+def retry_lead_delivery(
+    lead_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("broker_admin")),
+):
+    if not is_lead_webhook_enabled():
+        raise HTTPException(status_code=400, detail="Lead webhook is not configured.")
+
+    row = db.query(LeadRequest).filter(LeadRequest.id == lead_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Lead not found.")
+
+    row.webhook_status = "pending"
+    row.webhook_last_error = None
+    db.commit()
+    db.refresh(row)
+
+    background_tasks.add_task(send_lead_webhook, build_lead_webhook_payload(row))
+    return {"queued": True, "lead_id": int(row.id), "webhook_status": row.webhook_status}
 
 
 def _sync_sheets(db: Session):

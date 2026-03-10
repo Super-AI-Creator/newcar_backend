@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
@@ -9,6 +9,7 @@ from app.core.security import decode_token
 from app.models.lead_request import LeadRequest
 from app.models.user import User
 from app.schemas.leads import LeadCreateIn, LeadCreateOut
+from app.services.lead_delivery import build_lead_webhook_payload, is_lead_webhook_enabled, send_lead_webhook
 
 router = APIRouter(prefix="/leads", tags=["leads"])
 
@@ -34,6 +35,7 @@ def _resolve_optional_user(
 @router.post("", response_model=LeadCreateOut)
 def create_lead(
     payload: LeadCreateIn,
+    background_tasks: BackgroundTasks,
     creds: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: Session = Depends(get_db),
 ):
@@ -60,9 +62,14 @@ def create_lead(
         phone=payload.phone.strip(),
         notes=(payload.notes or "").strip() or None,
         source=(payload.source or "").strip() or None,
+        webhook_status="pending" if is_lead_webhook_enabled() else "skipped",
+        webhook_attempts=0,
+        webhook_last_error=None if is_lead_webhook_enabled() else "LEAD_WEBHOOK_URL is not configured",
     )
     db.add(row)
     db.commit()
     db.refresh(row)
+    if is_lead_webhook_enabled():
+        background_tasks.add_task(send_lead_webhook, build_lead_webhook_payload(row))
 
     return LeadCreateOut(saved=True, lead_id=int(row.id))
