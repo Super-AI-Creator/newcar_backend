@@ -13,6 +13,9 @@ from app.models.deal import Deal
 from app.models.lender_rate import LenderRate
 from app.models.deal_event import DealEvent
 from app.models.lead_request import LeadRequest
+from app.models.homepage_featured_vehicle import HomepageFeaturedVehicle
+from app.models.manual_vehicle import ManualVehicle
+from app.models.seo_page_setting import SeoPageSetting
 
 __all__ = [
     "Base",
@@ -30,4 +33,7 @@ __all__ = [
     "LenderRate",
     "DealEvent",
     "LeadRequest",
+    "HomepageFeaturedVehicle",
+    "ManualVehicle",
+    "SeoPageSetting",
 ]

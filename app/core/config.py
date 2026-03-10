@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     sheets_auto_sync_enabled: bool = Field(False)
     sheets_auto_sync_interval_minutes: int = Field(10)
     sheets_auto_sync_run_on_startup: bool = Field(True)
+    sheets_auto_sync_lock_wait_seconds: int = Field(20)
     sheets_webhook_secret: Optional[str] = Field(None)
     sheets_webhook_lock_wait_seconds: int = Field(2)
     lead_webhook_url: Optional[str] = Field(None)

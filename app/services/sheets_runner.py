@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.sheet_sources_meta import SheetSourceMeta
@@ -157,30 +156,36 @@ def _run_with_lock(
     lock_name: str = SHEETS_SYNC_LOCK_NAME,
     wait_seconds: int = 0,
 ) -> Dict[str, Any]:
-    lock_result = db.execute(
-        text("SELECT GET_LOCK(:lock_name, :wait_seconds)"),
-        {"lock_name": lock_name, "wait_seconds": max(0, int(wait_seconds or 0))},
-    ).scalar()
-    lock_acquired = str(lock_result) == "1"
-    if not lock_acquired:
-        return {
-            "ok": False,
-            "locked": True,
-            "detail": "A sheets sync is already running.",
-            "checked_only": False,
-            "offers": {"count": 0, "hash": None, "error": None},
-            "scores": {"count": 0, "hash": None, "error": None},
-        }
-
+    bind = db.get_bind()
+    engine = getattr(bind, "engine", bind)
+    lock_conn = engine.raw_connection()
+    lock_acquired = False
     try:
+        with lock_conn.cursor() as cursor:
+            cursor.execute("SELECT GET_LOCK(%s, %s)", (lock_name, max(0, int(wait_seconds or 0))))
+            row = cursor.fetchone()
+        lock_result = row[0] if row else None
+        lock_acquired = str(lock_result) == "1"
+        if not lock_acquired:
+            return {
+                "ok": False,
+                "locked": True,
+                "detail": "A sheets sync is already running.",
+                "checked_only": False,
+                "offers": {"count": 0, "hash": None, "error": None},
+                "scores": {"count": 0, "hash": None, "error": None},
+            }
+
         result = run_fn(db)
         result["locked"] = False
         return result
     finally:
-        db.execute(
-            text("SELECT RELEASE_LOCK(:lock_name)"),
-            {"lock_name": lock_name},
-        )
+        try:
+            if lock_acquired:
+                with lock_conn.cursor() as cursor:
+                    cursor.execute("SELECT RELEASE_LOCK(%s)", (lock_name,))
+        finally:
+            lock_conn.close()
 
 
 def run_sheets_sync_with_lock(

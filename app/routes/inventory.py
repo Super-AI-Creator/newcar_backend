@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -12,6 +14,8 @@ from app.core.database import engine
 from app.core.deps import get_db
 from app.models.model_score import ModelScore
 from app.models.offer_override import OfferOverride
+from app.models.homepage_featured_vehicle import HomepageFeaturedVehicle
+from app.models.manual_vehicle import ManualVehicle
 from app.models.user import User
 from app.schemas.inventory import InventoryItem, InventorySearchResponse, OfferOverrideOut, ModelScoreOut
 from app.services.legacy_tables import build_inventory_count_query, build_inventory_query, serialize_photos
@@ -25,6 +29,8 @@ _SEARCH_CACHE_MAX_ENTRIES = 256
 _FILTERS_CACHE: dict[str, tuple[float, dict]] = {}
 _FILTERS_CACHE_TTL_SECONDS = 30.0
 _FILTERS_CACHE_MAX_ENTRIES = 64
+_MONTH_KEY_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_MAX_HOMEPAGE_FEATURED_VEHICLES = 6
 
 
 def _serialize_details(raw):
@@ -166,6 +172,61 @@ def _filters_cache_set(key: str, payload: dict):
             _FILTERS_CACHE.pop(oldest_key, None)
 
 
+def _resolve_month_key(month: Optional[str]) -> str:
+    candidate = (month or "").strip()
+    if not candidate:
+        return datetime.now(timezone.utc).strftime("%Y-%m")
+    if not _MONTH_KEY_RE.match(candidate):
+        raise HTTPException(status_code=400, detail="month must be in YYYY-MM format.")
+    return candidate
+
+
+def _manual_vehicle_photos(raw: Optional[str]) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if item]
+    except Exception:
+        return []
+    return []
+
+
+def _manual_vehicle_matches(
+    row: ManualVehicle,
+    *,
+    make: Optional[str],
+    model: Optional[str],
+    trim: Optional[str],
+    year: Optional[int],
+    vehicle_type: str,
+    max_price: Optional[float],
+    max_mileage: Optional[int],
+    condition: str,
+) -> bool:
+    if not row.is_active:
+        return False
+    if make and (row.make or "").strip().lower() != make.strip().lower():
+        return False
+    if model and (row.model or "").strip().lower() != model.strip().lower():
+        return False
+    if trim and (row.trim or "").strip().lower() != trim.strip().lower():
+        return False
+    if year is not None and (row.year is None or int(row.year) != int(year)):
+        return False
+    if vehicle_type in {"new", "used"} and (row.vehicle_type or "new").strip().lower() != vehicle_type:
+        return False
+    if condition in {"used", "cpo"} and (row.condition or "").strip().lower() != condition:
+        return False
+    price = row.listed_price if row.listed_price is not None else row.msrp
+    if max_price is not None and price is not None and float(price) > float(max_price):
+        return False
+    if max_mileage is not None and row.mileage is not None and int(row.mileage) > int(max_mileage):
+        return False
+    return True
+
+
 @router.get("/filters")
 def inventory_filters(
     vehicle_type: str = Query("all", pattern="^(new|used|all)$"),
@@ -188,6 +249,16 @@ def inventory_filters(
         stmt = stmt.where(base.c.vin.in_(select(OfferOverride.vin)))
 
     rows = db.execute(stmt).fetchall()
+    manual_rows = db.query(ManualVehicle).filter(ManualVehicle.is_active == True).all()
+    manual_offer_vins: set[str] = set()
+    if offers_only and manual_rows:
+        vins = [str(row.vin).strip().upper() for row in manual_rows if row.vin]
+        if vins:
+            manual_offer_vins = {
+                str(row[0]).strip().upper()
+                for row in db.query(OfferOverride.vin).filter(OfferOverride.vin.in_(vins)).all()
+                if row and row[0]
+            }
     models_by_make: dict[str, set[str]] = {}
     trims_by_make_model: dict[str, set[str]] = {}
     makes_set: set[str] = set()
@@ -202,6 +273,27 @@ def inventory_filters(
         if trim_value is not None and str(trim_value).strip():
             combo_key = f"{make_key}|||{model_key}"
             trims_by_make_model.setdefault(combo_key, set()).add(str(trim_value).strip())
+
+    for row in manual_rows:
+        vin = str(row.vin or "").strip().upper()
+        if offers_only and vin not in manual_offer_vins:
+            continue
+        row_vehicle_type = (row.vehicle_type or "new").strip().lower()
+        if vehicle_type in {"new", "used"} and row_vehicle_type != vehicle_type:
+            continue
+        make_value = (row.make or "").strip()
+        model_value = (row.model or "").strip()
+        trim_value = (row.trim or "").strip()
+        if not make_value or not model_value:
+            continue
+        make_key = canonicalize_make(make_value)
+        if not make_key:
+            continue
+        makes_set.add(make_key)
+        models_by_make.setdefault(make_key, set()).add(model_value)
+        if trim_value:
+            combo_key = f"{make_key}|||{model_value}"
+            trims_by_make_model.setdefault(combo_key, set()).add(trim_value)
 
     makes = sorted(makes_set)
     models_by_make_sorted = {key: sorted(values) for key, values in models_by_make.items()}
@@ -358,6 +450,58 @@ def search_inventory(
             )
         )
 
+    manual_rows = db.query(ManualVehicle).filter(ManualVehicle.is_active == True).all()
+    manual_vins = [str(row.vin).strip().upper() for row in manual_rows if row.vin]
+    manual_offer_map = _load_offer_map(db, manual_vins)
+    manual_items: list[InventoryItem] = []
+    manual_match_count = 0
+    for row in manual_rows:
+        vin = str(row.vin or "").strip().upper()
+        if not vin:
+            continue
+        if not _manual_vehicle_matches(
+            row,
+            make=make,
+            model=model,
+            trim=trim,
+            year=year,
+            vehicle_type=vehicle_type,
+            max_price=max_price,
+            max_mileage=max_mileage,
+            condition=condition,
+        ):
+            continue
+        offer = manual_offer_map.get(vin)
+        offer_out = apply_offer_visibility(offer, (row.vehicle_type or "new").strip().lower())
+        if offers_only and not offer_out:
+            continue
+        manual_match_count += 1
+        if (max_payment is None or max_payment <= 0) and page != 1:
+            continue
+        manual_items.append(
+            InventoryItem(
+                vin=vin,
+                vehicle_type=(row.vehicle_type or "new").strip().lower(),
+                year=row.year,
+                make=row.make,
+                model=row.model,
+                trim=row.trim,
+                msrp=float(row.msrp) if row.msrp is not None else None,
+                listed_price=float(row.listed_price) if row.listed_price is not None else None,
+                mileage=row.mileage,
+                condition=(row.condition or "").strip().lower() or None,
+                details=_serialize_details(row.details_json),
+                photos=_manual_vehicle_photos(row.photos_json),
+                last_seen_at=str(row.updated_at) if row.updated_at else None,
+                dealer_name=row.dealer_name,
+                dealer_phone=row.dealer_phone,
+                listing_url=row.listing_url,
+                carfax_url=row.carfax_url,
+                offer=OfferOverrideOut(**offer_out) if offer_out else None,
+                model_scores=None,
+            )
+        )
+
     if max_payment is not None and max_payment > 0:
         def _monthly_ok(item: InventoryItem) -> bool:
             if (item.vehicle_type or "").lower() != "new":
@@ -367,9 +511,21 @@ def search_inventory(
                 return True
             return float(monthly) <= max_payment
         items = [i for i in items if _monthly_ok(i)]
+        if manual_items:
+            manual_filtered = [i for i in manual_items if _monthly_ok(i)]
+            if manual_filtered:
+                existing_vins = {str(i.vin).strip().upper() for i in manual_filtered}
+                items = manual_filtered + [i for i in items if str(i.vin).strip().upper() not in existing_vins]
         total = len(items)
         start = (page - 1) * page_size
         items = items[start : start + page_size]
+    else:
+        if total is not None:
+            total += manual_match_count
+        if manual_items:
+            existing_vins = {str(i.vin).strip().upper() for i in manual_items}
+            items = manual_items + [i for i in items if str(i.vin).strip().upper() not in existing_vins]
+            items = items[:page_size]
 
     response = InventorySearchResponse(items=items, page=page, page_size=page_size, total=total or 0)
     payload = response.model_dump() if hasattr(response, "model_dump") else response.dict()
@@ -377,31 +533,144 @@ def search_inventory(
     return response
 
 
+@router.get("/homepage-specials", response_model=InventorySearchResponse, response_model_exclude_none=True)
+def homepage_specials(
+    limit: int = Query(_MAX_HOMEPAGE_FEATURED_VEHICLES, ge=1, le=_MAX_HOMEPAGE_FEATURED_VEHICLES),
+    month: Optional[str] = Query(None, description="Month key in YYYY-MM. Defaults to current UTC month."),
+    db: Session = Depends(get_db),
+):
+    month_key = _resolve_month_key(month)
+    featured_rows = (
+        db.query(HomepageFeaturedVehicle)
+        .filter(HomepageFeaturedVehicle.month_key == month_key)
+        .order_by(HomepageFeaturedVehicle.position.asc(), HomepageFeaturedVehicle.id.asc())
+        .all()
+    )
+    items: list[InventoryItem] = []
+    seen_vins: set[str] = set()
+
+    for row in featured_rows:
+        vin = str(row.vin or "").strip().upper()
+        if not vin or vin in seen_vins:
+            continue
+        try:
+            item = get_inventory_item(vin=vin, db=db)
+        except HTTPException:
+            continue
+        items.append(item)
+        seen_vins.add(vin)
+        if len(items) >= limit:
+            break
+
+    if len(items) < limit:
+        fallback = search_inventory(
+            vehicle_type="new",
+            offers_only=True,
+            page=1,
+            page_size=max(50, limit * 10),
+            db=db,
+        )
+        for item in fallback.items:
+            vin = str(item.vin or "").strip().upper()
+            if not vin or vin in seen_vins:
+                continue
+            items.append(item)
+            seen_vins.add(vin)
+            if len(items) >= limit:
+                break
+
+    return InventorySearchResponse(
+        items=items[:limit],
+        page=1,
+        page_size=limit,
+        total=len(items[:limit]),
+    )
+
+
 @router.get("/{vin}", response_model=InventoryItem, response_model_exclude_none=True)
 def get_inventory_item(
     vin: str,
     db: Session = Depends(get_db),
 ):
-    query = build_inventory_query(engine, {"vin": vin})
+    normalized_vin = (vin or "").strip().upper()
+    query = build_inventory_query(engine, {"vin": normalized_vin})
     row = db.execute(query).fetchone()
     if not row:
-        raise HTTPException(status_code=404, detail="VIN not found")
+        manual = (
+            db.query(ManualVehicle)
+            .filter(ManualVehicle.vin == normalized_vin, ManualVehicle.is_active == True)
+            .first()
+        )
+        if not manual:
+            raise HTTPException(status_code=404, detail="VIN not found")
+        offer = db.query(OfferOverride).filter(OfferOverride.vin == normalized_vin).first()
+        offer_out = apply_offer_visibility(offer, (manual.vehicle_type or "new").strip().lower())
+        return InventoryItem(
+            vin=normalized_vin,
+            vehicle_type=(manual.vehicle_type or "new").strip().lower(),
+            year=manual.year,
+            make=manual.make,
+            model=manual.model,
+            trim=manual.trim,
+            msrp=float(manual.msrp) if manual.msrp is not None else None,
+            listed_price=float(manual.listed_price) if manual.listed_price is not None else None,
+            mileage=manual.mileage,
+            condition=(manual.condition or "").strip().lower() or None,
+            details=_serialize_details(manual.details_json),
+            photos=_manual_vehicle_photos(manual.photos_json),
+            last_seen_at=str(manual.updated_at) if manual.updated_at else None,
+            dealer_name=manual.dealer_name,
+            dealer_phone=manual.dealer_phone,
+            listing_url=manual.listing_url,
+            carfax_url=manual.carfax_url,
+            offer=OfferOverrideOut(**offer_out) if offer_out else None,
+            model_scores=None,
+        )
 
     mapping = row._mapping
+    manual_override = (
+        db.query(ManualVehicle)
+        .filter(ManualVehicle.vin == normalized_vin, ManualVehicle.is_active == True)
+        .first()
+    )
     row_vehicle_type = (mapping.get("vehicle_type") or "").lower() or None
+    effective_vehicle_type = (
+        (manual_override.vehicle_type or "").strip().lower()
+        if manual_override and manual_override.vehicle_type
+        else row_vehicle_type
+    )
+    effective_year = manual_override.year if manual_override and manual_override.year is not None else mapping.get("year")
+    effective_make = manual_override.make if manual_override and manual_override.make else mapping.get("make")
+    effective_model = manual_override.model if manual_override and manual_override.model else mapping.get("model")
+    effective_trim = manual_override.trim if manual_override and manual_override.trim else mapping.get("trim")
+    effective_msrp = manual_override.msrp if manual_override and manual_override.msrp is not None else mapping.get("msrp")
+    effective_listed_price = (
+        manual_override.listed_price if manual_override and manual_override.listed_price is not None else mapping.get("listed_price")
+    )
+    effective_mileage = manual_override.mileage if manual_override and manual_override.mileage is not None else mapping.get("mileage")
+    effective_condition = (
+        (manual_override.condition or "").strip().lower()
+        if manual_override and manual_override.condition
+        else (str(mapping.get("condition")).lower() if mapping.get("condition") else None)
+    )
+    effective_details = manual_override.details_json if manual_override and manual_override.details_json else mapping.get("details")
+    effective_photos = manual_override.photos_json if manual_override and manual_override.photos_json else mapping.get("photos")
+    effective_dealer_name = manual_override.dealer_name if manual_override and manual_override.dealer_name else mapping.get("dealer_name")
+    effective_listing_url = manual_override.listing_url if manual_override and manual_override.listing_url else mapping.get("listing_url")
+    effective_carfax_url = manual_override.carfax_url if manual_override and manual_override.carfax_url else mapping.get("carfax_url")
     dealer_email = _normalize_email(mapping.get("dealer_email"))
-    dealer_phone = mapping.get("dealer_phone")
+    dealer_phone = manual_override.dealer_phone if manual_override and manual_override.dealer_phone else mapping.get("dealer_phone")
     if not dealer_phone and dealer_email:
         dealer_phone = _dealer_phone_by_email(db, {dealer_email}).get(dealer_email)
-    offer = db.query(OfferOverride).filter(OfferOverride.vin == vin).first()
-    offer_out = apply_offer_visibility(offer, row_vehicle_type)
+    offer = db.query(OfferOverride).filter(OfferOverride.vin == normalized_vin).first()
+    offer_out = apply_offer_visibility(offer, effective_vehicle_type)
 
     score = None
-    if mapping.get("make") and mapping.get("model"):
-        make_value = mapping.get("make")
-        model_value = mapping.get("model")
-        trim_value = mapping.get("trim")
-        year_value = mapping.get("year")
+    if effective_make and effective_model:
+        make_value = effective_make
+        model_value = effective_model
+        trim_value = effective_trim
+        year_value = effective_year
         score = (
             db.query(ModelScore)
             .filter(
@@ -447,23 +716,23 @@ def get_inventory_item(
             )
 
     return InventoryItem(
-        vin=vin,
-        vehicle_type=row_vehicle_type,
-        year=mapping.get("year"),
-        make=mapping.get("make"),
-        model=mapping.get("model"),
-        trim=mapping.get("trim"),
-        msrp=float(mapping.get("msrp")) if mapping.get("msrp") is not None else None,
-        listed_price=float(mapping.get("listed_price")) if mapping.get("listed_price") is not None else None,
-        mileage=mapping.get("mileage"),
-        condition=str(mapping.get("condition")).lower() if mapping.get("condition") else None,
-        details=_serialize_details(mapping.get("details")),
-        photos=serialize_photos(mapping.get("photos")),
+        vin=normalized_vin,
+        vehicle_type=effective_vehicle_type,
+        year=effective_year,
+        make=effective_make,
+        model=effective_model,
+        trim=effective_trim,
+        msrp=float(effective_msrp) if effective_msrp is not None else None,
+        listed_price=float(effective_listed_price) if effective_listed_price is not None else None,
+        mileage=effective_mileage,
+        condition=effective_condition,
+        details=_serialize_details(effective_details),
+        photos=_manual_vehicle_photos(effective_photos) if manual_override and manual_override.photos_json else serialize_photos(effective_photos),
         last_seen_at=str(mapping.get("last_seen_at")) if mapping.get("last_seen_at") else None,
-        dealer_name=mapping.get("dealer_name"),
+        dealer_name=effective_dealer_name,
         dealer_phone=dealer_phone,
-        listing_url=mapping.get("listing_url"),
-        carfax_url=mapping.get("carfax_url"),
+        listing_url=effective_listing_url,
+        carfax_url=effective_carfax_url,
         offer=OfferOverrideOut(**offer_out) if offer_out else None,
         model_scores=ModelScoreOut(
             design=score.design,

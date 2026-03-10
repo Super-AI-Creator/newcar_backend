@@ -27,9 +27,10 @@ class SheetsSyncScheduler:
         self._thread = threading.Thread(target=self._run_loop, name="sheets-auto-sync", daemon=True)
         self._thread.start()
         logger.info(
-            "Sheets auto-sync started (interval=%s minutes, run_on_startup=%s).",
+            "Sheets auto-sync started (interval=%s minutes, run_on_startup=%s, lock_wait=%s seconds).",
             settings.sheets_auto_sync_interval_minutes,
             settings.sheets_auto_sync_run_on_startup,
+            settings.sheets_auto_sync_lock_wait_seconds,
         )
 
     def stop(self) -> None:
@@ -54,10 +55,13 @@ class SheetsSyncScheduler:
             result = run_sheets_sync_if_changed_with_lock(
                 db,
                 lock_name=self._lock_name,
-                wait_seconds=0,
+                wait_seconds=max(0, int(settings.sheets_auto_sync_lock_wait_seconds or 0)),
             )
             if result.get("locked"):
-                logger.info("Sheets auto-sync skipped (lock held by another worker).")
+                logger.info(
+                    "Sheets auto-sync skipped (lock held by another worker, wait_seconds=%s).",
+                    settings.sheets_auto_sync_lock_wait_seconds,
+                )
                 return
 
             offers = result.get("offers", {})
@@ -91,4 +95,3 @@ class SheetsSyncScheduler:
             logger.exception("Sheets auto-sync failed: %s", exc)
         finally:
             db.close()
-

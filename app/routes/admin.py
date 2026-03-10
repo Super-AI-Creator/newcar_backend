@@ -1,23 +1,33 @@
-from typing import Optional
+from typing import Any, Optional
+from datetime import datetime, timezone
+import re
+import json
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import engine
 from app.core.deps import get_db, require_role
 from app.models.enums import OfferSource
+from app.models.homepage_featured_vehicle import HomepageFeaturedVehicle
 from app.models.lead_request import LeadRequest
+from app.models.manual_vehicle import ManualVehicle
 from app.models.offer_override import OfferOverride
 from app.models.model_score import ModelScore
+from app.models.seo_page_setting import SeoPageSetting
 from app.models.sheet_sources_meta import SheetSourceMeta
 from app.services.offers import set_offer_visibility
 from app.services.lead_delivery import build_lead_webhook_payload, is_lead_webhook_enabled, send_lead_webhook
 from app.services.legacy_tables import build_inventory_query, load_legacy_tables
-from app.services.sheets_runner import run_sheets_sync
+from app.services.sheets_runner import run_sheets_sync_with_lock
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+MAX_HOMEPAGE_FEATURED_VEHICLES = 6
+_MONTH_KEY_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_SEO_PAGE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 @router.get("/sources")
@@ -141,7 +151,10 @@ def retry_lead_delivery(
 def _sync_sheets(db: Session):
     if not (db and engine):
         raise HTTPException(status_code=500, detail="Database not ready")
-    return run_sheets_sync(db)
+    return run_sheets_sync_with_lock(
+        db,
+        wait_seconds=max(0, int(settings.sheets_webhook_lock_wait_seconds or 0)),
+    )
 
 
 class OfferOverrideUpdate(BaseModel):
@@ -164,6 +177,473 @@ def _normalize_vin(vin: str) -> str:
     if len(normalized) < 8:
         raise HTTPException(status_code=400, detail="VIN must be at least 8 characters.")
     return normalized
+
+
+def _resolve_month_key(month: Optional[str]) -> str:
+    candidate = (month or "").strip()
+    if not candidate:
+        return datetime.now(timezone.utc).strftime("%Y-%m")
+    if not _MONTH_KEY_RE.match(candidate):
+        raise HTTPException(status_code=400, detail="month must be in YYYY-MM format.")
+    return candidate
+
+
+def _normalize_seo_page_key(page_key: str) -> str:
+    normalized = (page_key or "").strip().lower()
+    if not _SEO_PAGE_KEY_RE.match(normalized):
+        raise HTTPException(
+            status_code=400,
+            detail="page_key must be lowercase letters/numbers and may include _ or - (max 64 chars).",
+        )
+    return normalized
+
+
+def _clean_optional_text(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _parse_json_ld(raw: Optional[str]) -> Optional[Any]:
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _serialize_seo_page_setting(row: SeoPageSetting) -> dict:
+    return {
+        "page_key": row.page_key,
+        "title": row.title,
+        "description": row.description,
+        "keywords": row.keywords,
+        "canonical_url": row.canonical_url,
+        "og_title": row.og_title,
+        "og_description": row.og_description,
+        "og_image_url": row.og_image_url,
+        "robots": row.robots,
+        "json_ld": _parse_json_ld(row.json_ld_text),
+        "is_active": bool(row.is_active),
+        "updated_at": str(row.updated_at) if row.updated_at else None,
+        "created_at": str(row.created_at) if row.created_at else None,
+    }
+
+
+def _vin_exists_in_inventory(db: Session, vin: str) -> bool:
+    if db.execute(build_inventory_query(engine, {"vin": vin}).limit(1)).first() is not None:
+        return True
+    manual = (
+        db.query(ManualVehicle)
+        .filter(ManualVehicle.vin == vin, ManualVehicle.is_active == True)
+        .first()
+    )
+    return manual is not None
+
+
+def _vehicle_summary_by_vin(db: Session, vin: str) -> dict:
+    row = db.execute(build_inventory_query(engine, {"vin": vin}).limit(1)).first()
+    offer = db.query(OfferOverride).filter(OfferOverride.vin == vin).first()
+    if row:
+        mapping = row._mapping
+        return {
+            "vin": vin,
+            "found": True,
+            "year": mapping.get("year"),
+            "make": mapping.get("make"),
+            "model": mapping.get("model"),
+            "trim": mapping.get("trim"),
+            "monthly_payment": float(offer.monthly_payment) if offer and offer.monthly_payment is not None else None,
+            "down_payment": float(offer.down_payment) if offer and offer.down_payment is not None else None,
+            "discounted_price": float(offer.discounted_price) if offer and offer.discounted_price is not None else None,
+        }
+    manual = (
+        db.query(ManualVehicle)
+        .filter(ManualVehicle.vin == vin, ManualVehicle.is_active == True)
+        .first()
+    )
+    if manual:
+        return {
+            "vin": vin,
+            "found": True,
+            "year": manual.year,
+            "make": manual.make,
+            "model": manual.model,
+            "trim": manual.trim,
+            "monthly_payment": float(offer.monthly_payment) if offer and offer.monthly_payment is not None else None,
+            "down_payment": float(offer.down_payment) if offer and offer.down_payment is not None else None,
+            "discounted_price": float(offer.discounted_price) if offer and offer.discounted_price is not None else None,
+        }
+    return {"vin": vin, "found": False}
+
+
+def _serialize_homepage_featured(db: Session, month_key: str):
+    rows = (
+        db.query(HomepageFeaturedVehicle)
+        .filter(HomepageFeaturedVehicle.month_key == month_key)
+        .order_by(HomepageFeaturedVehicle.position.asc(), HomepageFeaturedVehicle.id.asc())
+        .all()
+    )
+    vins = [str(row.vin).strip().upper() for row in rows if row.vin]
+    items = []
+    for row in rows:
+        vin = str(row.vin).strip().upper()
+        items.append(
+            {
+                "position": int(row.position),
+                "vin": vin,
+                "updated_at": str(row.updated_at) if row.updated_at else None,
+                "vehicle": _vehicle_summary_by_vin(db, vin),
+            }
+        )
+    return {
+        "month": month_key,
+        "max_items": MAX_HOMEPAGE_FEATURED_VEHICLES,
+        "count": len(items),
+        "vins": vins,
+        "items": items,
+    }
+
+
+class HomepageFeaturedUpdate(BaseModel):
+    vins: list[str] = []
+
+
+class ManualVehicleUpsert(BaseModel):
+    vehicle_type: Optional[str] = "new"
+    year: Optional[int] = None
+    make: Optional[str] = None
+    model: Optional[str] = None
+    trim: Optional[str] = None
+    msrp: Optional[float] = None
+    listed_price: Optional[float] = None
+    mileage: Optional[int] = None
+    condition: Optional[str] = None
+    photos: list[str] = []
+    details: Optional[dict] = None
+    dealer_name: Optional[str] = None
+    dealer_phone: Optional[str] = None
+    listing_url: Optional[str] = None
+    carfax_url: Optional[str] = None
+    down_payment: Optional[float] = None
+    monthly_payment: Optional[float] = None
+    discounted_price: Optional[float] = None
+    term_months: Optional[int] = None
+    miles_per_year: Optional[int] = None
+
+
+class SeoPageSettingUpsert(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    keywords: Optional[str] = None
+    canonical_url: Optional[str] = None
+    og_title: Optional[str] = None
+    og_description: Optional[str] = None
+    og_image_url: Optional[str] = None
+    robots: Optional[str] = None
+    json_ld: Optional[Any] = None
+    is_active: Optional[bool] = True
+
+
+def _serialize_manual_vehicle(row: ManualVehicle, offer: Optional[OfferOverride] = None) -> dict:
+    photos = []
+    details = None
+    if row.photos_json:
+        try:
+            parsed = json.loads(row.photos_json)
+            if isinstance(parsed, list):
+                photos = [str(item) for item in parsed if item]
+        except Exception:
+            photos = []
+    if row.details_json:
+        try:
+            parsed = json.loads(row.details_json)
+            if isinstance(parsed, dict):
+                details = parsed
+        except Exception:
+            details = None
+    return {
+        "vin": row.vin,
+        "vehicle_type": row.vehicle_type,
+        "year": row.year,
+        "make": row.make,
+        "model": row.model,
+        "trim": row.trim,
+        "msrp": row.msrp,
+        "listed_price": row.listed_price,
+        "mileage": row.mileage,
+        "condition": row.condition,
+        "photos": photos,
+        "details": details,
+        "dealer_name": row.dealer_name,
+        "dealer_phone": row.dealer_phone,
+        "listing_url": row.listing_url,
+        "carfax_url": row.carfax_url,
+        "is_active": bool(row.is_active),
+        "updated_at": str(row.updated_at) if row.updated_at else None,
+        "down_payment": float(offer.down_payment) if offer and offer.down_payment is not None else None,
+        "monthly_payment": float(offer.monthly_payment) if offer and offer.monthly_payment is not None else None,
+        "discounted_price": float(offer.discounted_price) if offer and offer.discounted_price is not None else None,
+        "term_months": int(offer.term_months) if offer and offer.term_months is not None else None,
+        "miles_per_year": int(offer.miles_per_year) if offer and offer.miles_per_year is not None else None,
+    }
+
+
+@router.get("/homepage-featured")
+def get_homepage_featured(
+    month: Optional[str] = Query(None, description="Month key in YYYY-MM. Defaults to current UTC month."),
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    month_key = _resolve_month_key(month)
+    return _serialize_homepage_featured(db, month_key)
+
+
+@router.put("/homepage-featured")
+def set_homepage_featured(
+    payload: HomepageFeaturedUpdate,
+    month: Optional[str] = Query(None, description="Month key in YYYY-MM. Defaults to current UTC month."),
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    month_key = _resolve_month_key(month)
+    ordered_vins: list[str] = []
+    seen: set[str] = set()
+    for vin in payload.vins:
+        normalized = _normalize_vin(vin)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered_vins.append(normalized)
+
+    if len(ordered_vins) > MAX_HOMEPAGE_FEATURED_VEHICLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"You can feature up to {MAX_HOMEPAGE_FEATURED_VEHICLES} vehicles.",
+        )
+
+    missing = [vin for vin in ordered_vins if not _vin_exists_in_inventory(db, vin)]
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Some VINs were not found in inventory: {', '.join(missing)}",
+        )
+
+    (
+        db.query(HomepageFeaturedVehicle)
+        .filter(HomepageFeaturedVehicle.month_key == month_key)
+        .delete(synchronize_session=False)
+    )
+    for idx, vin in enumerate(ordered_vins, start=1):
+        db.add(
+            HomepageFeaturedVehicle(
+                month_key=month_key,
+                position=idx,
+                vin=vin,
+                updated_by_user_id=getattr(user, "id", None),
+            )
+        )
+
+    db.commit()
+    return _serialize_homepage_featured(db, month_key)
+
+
+@router.get("/manual-vehicles")
+def list_manual_vehicles(
+    q: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    include_inactive: bool = Query(False),
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    query = db.query(ManualVehicle)
+    if not include_inactive:
+        query = query.filter(ManualVehicle.is_active == True)
+    if q:
+        needle = q.strip()
+        if needle:
+            query = query.filter(
+                (ManualVehicle.vin.ilike(f"%{needle}%"))
+                | (ManualVehicle.make.ilike(f"%{needle}%"))
+                | (ManualVehicle.model.ilike(f"%{needle}%"))
+                | (ManualVehicle.trim.ilike(f"%{needle}%"))
+            )
+
+    rows = query.order_by(ManualVehicle.updated_at.desc(), ManualVehicle.created_at.desc()).limit(limit).all()
+    vins = [row.vin for row in rows if row.vin]
+    offers = db.query(OfferOverride).filter(OfferOverride.vin.in_(vins)).all() if vins else []
+    offer_map = {row.vin: row for row in offers}
+    return {"items": [_serialize_manual_vehicle(row, offer_map.get(row.vin)) for row in rows]}
+
+
+@router.put("/manual-vehicles/{vin}")
+def upsert_manual_vehicle(
+    vin: str,
+    payload: ManualVehicleUpsert,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    normalized_vin = _normalize_vin(vin)
+    vehicle_type = (payload.vehicle_type or "new").strip().lower()
+    if vehicle_type not in {"new", "used"}:
+        raise HTTPException(status_code=400, detail="vehicle_type must be 'new' or 'used'.")
+
+    row = db.query(ManualVehicle).filter(ManualVehicle.vin == normalized_vin).first()
+    if not row:
+        row = ManualVehicle(vin=normalized_vin)
+        db.add(row)
+
+    row.vehicle_type = vehicle_type
+    row.year = payload.year
+    row.make = payload.make.strip() if payload.make else None
+    row.model = payload.model.strip() if payload.model else None
+    row.trim = payload.trim.strip() if payload.trim else None
+    row.msrp = payload.msrp
+    row.listed_price = payload.listed_price
+    row.mileage = payload.mileage
+    row.condition = payload.condition.strip().lower() if payload.condition else None
+    row.photos_json = json.dumps([str(item).strip() for item in payload.photos if str(item).strip()])
+    row.details_json = json.dumps(payload.details or {}) if payload.details is not None else None
+    row.dealer_name = payload.dealer_name.strip() if payload.dealer_name else None
+    row.dealer_phone = payload.dealer_phone.strip() if payload.dealer_phone else None
+    row.listing_url = payload.listing_url.strip() if payload.listing_url else None
+    row.carfax_url = payload.carfax_url.strip() if payload.carfax_url else None
+    row.is_active = True
+    row.updated_by_user_id = getattr(user, "id", None)
+
+    offer_payload_has_values = any(
+        value is not None
+        for value in [
+            payload.down_payment,
+            payload.monthly_payment,
+            payload.discounted_price,
+            payload.term_months,
+            payload.miles_per_year,
+        ]
+    )
+    if offer_payload_has_values:
+        offer = db.query(OfferOverride).filter(OfferOverride.vin == normalized_vin).first()
+        if not offer:
+            offer = OfferOverride(vin=normalized_vin, source=OfferSource.broker, updated_by_user_id=getattr(user, "id", None))
+            db.add(offer)
+        offer.down_payment = payload.down_payment
+        offer.monthly_payment = payload.monthly_payment
+        offer.discounted_price = payload.discounted_price
+        offer.term_months = payload.term_months
+        offer.miles_per_year = payload.miles_per_year
+        offer.source = OfferSource.broker
+        offer.updated_by_user_id = getattr(user, "id", None)
+        set_offer_visibility(offer)
+
+    db.commit()
+    db.refresh(row)
+    offer = db.query(OfferOverride).filter(OfferOverride.vin == normalized_vin).first()
+    return {"status": "updated", "item": _serialize_manual_vehicle(row, offer)}
+
+
+@router.delete("/manual-vehicles/{vin}")
+def delete_manual_vehicle(
+    vin: str,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    normalized_vin = _normalize_vin(vin)
+    row = db.query(ManualVehicle).filter(ManualVehicle.vin == normalized_vin).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Manual vehicle not found.")
+    db.delete(row)
+    db.commit()
+    return {"deleted": True, "vin": normalized_vin}
+
+
+@router.get("/seo-settings")
+def list_seo_settings(
+    q: Optional[str] = Query(None),
+    include_inactive: bool = Query(False),
+    limit: int = Query(200, ge=1, le=500),
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    query = db.query(SeoPageSetting)
+    if not include_inactive:
+        query = query.filter(SeoPageSetting.is_active == True)
+    if q:
+        needle = q.strip()
+        if needle:
+            query = query.filter(
+                (SeoPageSetting.page_key.ilike(f"%{needle}%"))
+                | (SeoPageSetting.title.ilike(f"%{needle}%"))
+                | (SeoPageSetting.description.ilike(f"%{needle}%"))
+            )
+    rows = query.order_by(SeoPageSetting.page_key.asc()).limit(limit).all()
+    return {"items": [_serialize_seo_page_setting(row) for row in rows]}
+
+
+@router.get("/seo-settings/{page_key}")
+def get_seo_setting(
+    page_key: str,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    normalized_key = _normalize_seo_page_key(page_key)
+    row = db.query(SeoPageSetting).filter(SeoPageSetting.page_key == normalized_key).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="SEO setting not found.")
+    return _serialize_seo_page_setting(row)
+
+
+@router.put("/seo-settings/{page_key}")
+def upsert_seo_setting(
+    page_key: str,
+    payload: SeoPageSettingUpsert,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    normalized_key = _normalize_seo_page_key(page_key)
+    row = db.query(SeoPageSetting).filter(SeoPageSetting.page_key == normalized_key).first()
+    if not row:
+        row = SeoPageSetting(page_key=normalized_key)
+        db.add(row)
+
+    row.title = _clean_optional_text(payload.title)
+    row.description = _clean_optional_text(payload.description)
+    row.keywords = _clean_optional_text(payload.keywords)
+    row.canonical_url = _clean_optional_text(payload.canonical_url)
+    row.og_title = _clean_optional_text(payload.og_title)
+    row.og_description = _clean_optional_text(payload.og_description)
+    row.og_image_url = _clean_optional_text(payload.og_image_url)
+    row.robots = _clean_optional_text(payload.robots)
+    row.json_ld_text = json.dumps(payload.json_ld) if payload.json_ld is not None else None
+    if payload.is_active is not None:
+        row.is_active = bool(payload.is_active)
+    row.updated_by_user_id = getattr(user, "id", None)
+
+    db.commit()
+    db.refresh(row)
+    return {"status": "updated", "item": _serialize_seo_page_setting(row)}
+
+
+@router.delete("/seo-settings/{page_key}")
+def delete_seo_setting(
+    page_key: str,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    normalized_key = _normalize_seo_page_key(page_key)
+    row = db.query(SeoPageSetting).filter(SeoPageSetting.page_key == normalized_key).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="SEO setting not found.")
+    db.delete(row)
+    db.commit()
+    return {"deleted": True, "page_key": normalized_key}
 
 
 @router.get("/offer-overrides")

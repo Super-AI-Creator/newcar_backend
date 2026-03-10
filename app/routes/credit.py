@@ -41,6 +41,7 @@ def _serialize_credit_application(
         "broker_note": row.broker_note,
         "reviewed_by_user_id": int(row.reviewed_by_user_id) if row.reviewed_by_user_id is not None else None,
         "reviewed_by_name": reviewer.name if reviewer else None,
+        "reviewed_by_email": reviewer.email if reviewer else None,
         "reviewed_at": row.reviewed_at.isoformat() if row.reviewed_at else None,
         "payload_json": payload,
         "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -89,7 +90,7 @@ def list_credit_applications(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    user=Depends(require_role("broker_admin", "admin")),
+    user=Depends(require_role("broker_admin", "admin", "super_admin")),
 ):
     _ = user
     query = db.query(CreditApplication).order_by(CreditApplication.created_at.desc())
