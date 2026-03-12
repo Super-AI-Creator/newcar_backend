@@ -480,15 +480,15 @@ def search_inventory(
         "condition": condition,
     }
     base_query = build_inventory_query(engine, filters)
-    if max_payment is not None and max_payment > 0:
+    if offers_only:
+        fetch_size = None
+        offset = 0
+    elif max_payment is not None and max_payment > 0:
         fetch_size = min(500, max(page_size * 10, 100))
         offset = 0
     else:
         fetch_size = page_size
         offset = (page - 1) * page_size
-    if offers_only:
-        fetch_size = min(5000, max(fetch_size, page_size * 100, 1000))
-        offset = 0
 
     sort_col = base_query.selected_columns.get("sort_price")
     if sort_col is None:
@@ -498,12 +498,17 @@ def search_inventory(
     elif sort == "price_desc" and sort_col is not None:
         base_query = base_query.order_by(sort_col.desc())
 
-    if max_payment is None or max_payment <= 0:
+    if offers_only:
+        total = None
+    elif max_payment is None or max_payment <= 0:
         total = db.execute(build_inventory_count_query(engine, filters)).scalar() or 0
     else:
         total = None
 
-    rows = db.execute(base_query.limit(fetch_size).offset(offset)).fetchall()
+    if offers_only:
+        rows = db.execute(base_query).fetchall()
+    else:
+        rows = db.execute(base_query.limit(fetch_size).offset(offset)).fetchall()
     vins = [r._mapping.get("vin") for r in rows if r._mapping.get("vin")]
     offer_map = _load_offer_map(db, vins)
     ymm_keys_needed: set[tuple[int, str, str]] = set()
