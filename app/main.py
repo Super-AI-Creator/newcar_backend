@@ -1,4 +1,5 @@
 import os
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, Depends, HTTPException, Request
@@ -16,7 +17,7 @@ from app.services.sheets_scheduler import SheetsSyncScheduler
 app = FastAPI(title="NewCarSuperstore App Backend")
 _sheets_scheduler = SheetsSyncScheduler()
 _uploads_dir = Path(__file__).resolve().parents[1] / "uploads"
-_uploads_dir.mkdir(parents=True, exist_ok=True)
+logger = logging.getLogger(__name__)
 
 _cors_origins = [
     "http://localhost:3000",
@@ -35,7 +36,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.mount("/uploads", StaticFiles(directory=str(_uploads_dir)), name="uploads")
+app.mount("/uploads", StaticFiles(directory=str(_uploads_dir), check_dir=False), name="uploads")
 
 
 @app.exception_handler(OperationalError)
@@ -76,12 +77,18 @@ def health():
 
 @app.on_event("startup")
 def start_background_jobs():
-    _sheets_scheduler.start()
+    try:
+        _sheets_scheduler.start()
+    except Exception:
+        logger.exception("Sheets scheduler startup failed; continuing without background sync.")
 
 
 @app.on_event("shutdown")
 def stop_background_jobs():
-    _sheets_scheduler.stop()
+    try:
+        _sheets_scheduler.stop()
+    except Exception:
+        logger.exception("Sheets scheduler shutdown failed.")
 
 
 @app.get("/me", response_model=UserOut)
