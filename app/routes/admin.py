@@ -1,11 +1,13 @@
 from typing import Any, Optional
 from datetime import datetime, timezone
+from pathlib import Path
 import re
 import json
+from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import case, func, or_, select, true
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -19,6 +21,7 @@ from app.models.offer_override import OfferOverride
 from app.models.model_score import ModelScore
 from app.models.seo_page_setting import SeoPageSetting
 from app.models.sheet_sources_meta import SheetSourceMeta
+from app.services.cloudinary import CloudinaryUploadError, cloudinary_is_configured, upload_image_to_cloudinary
 from app.services.offers import set_offer_visibility
 from app.services.lead_delivery import build_lead_webhook_payload, is_lead_webhook_enabled, send_lead_webhook
 from app.services.legacy_tables import build_inventory_query, load_legacy_tables
@@ -28,6 +31,13 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 MAX_HOMEPAGE_FEATURED_VEHICLES = 6
 _MONTH_KEY_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _SEO_PAGE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+MAX_MANUAL_PHOTO_BYTES = 8 * 1024 * 1024
+_MANUAL_PHOTO_MIME_SUFFIX = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+_MANUAL_PHOTO_UPLOAD_DIR = Path(__file__).resolve().parents[2] / "uploads" / "manual-vehicles"
 
 
 @router.get("/sources")
@@ -214,6 +224,53 @@ def _parse_json_ld(raw: Optional[str]) -> Optional[Any]:
         return None
 
 
+def _table_col(table, *candidates: str):
+    for name in candidates:
+        if name in table.c:
+            return table.c[name]
+    return None
+
+
+def _truthy_filter(column):
+    if column is None:
+        return true()
+    predicates = [column == 1, column == True]  # noqa: E712
+    type_name = str(getattr(column, "type", "")).lower()
+    if any(token in type_name for token in ["char", "text", "string", "enum"]):
+        predicates.append(func.lower(func.trim(column)).in_(["1", "true", "yes", "active", "enabled"]))
+    return or_(*predicates)
+
+
+def _active_listing_filter(listings_table):
+    status_col = _table_col(listings_table, "status")
+    is_active_col = _table_col(listings_table, "is_active")
+    predicates = []
+    if status_col is not None:
+        predicates.append(func.lower(func.trim(status_col)) == "active")
+    if is_active_col is not None:
+        predicates.append(_truthy_filter(is_active_col))
+    if not predicates:
+        return true()
+    return or_(*predicates)
+
+
+def _normalized_listing_vehicle_type_expr(listings_table):
+    vehicle_type_col = _table_col(listings_table, "vehicle_type")
+    condition_col = _table_col(listings_table, "condition")
+    whens = []
+    if condition_col is not None:
+        condition_norm = func.lower(func.trim(condition_col))
+        whens.append((condition_norm == "new", "new"))
+        whens.append((condition_norm.in_(["used", "cpo"]), "used"))
+    if vehicle_type_col is not None:
+        vehicle_type_norm = func.lower(func.trim(vehicle_type_col))
+        whens.append((vehicle_type_norm == "new", "new"))
+        whens.append((vehicle_type_norm == "used", "used"))
+    if not whens:
+        return None
+    return case(*whens, else_=None)
+
+
 def _serialize_seo_page_setting(row: SeoPageSetting) -> dict:
     return {
         "page_key": row.page_key,
@@ -229,6 +286,101 @@ def _serialize_seo_page_setting(row: SeoPageSetting) -> dict:
         "is_active": bool(row.is_active),
         "updated_at": str(row.updated_at) if row.updated_at else None,
         "created_at": str(row.created_at) if row.created_at else None,
+    }
+
+
+@router.get("/general-status")
+def general_status(
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    tables = load_legacy_tables(engine)
+    dealer_sources = tables["dealer_sources"]
+    listings = tables["vehicle_listings"]
+
+    enabled_col = _table_col(dealer_sources, "enabled", "is_active", "active")
+    source_status_col = _table_col(dealer_sources, "status", "source_status", "last_scrape_status")
+    active_source_filter = _truthy_filter(enabled_col)
+    if source_status_col is not None:
+        active_source_filter = or_(active_source_filter, func.lower(func.trim(source_status_col)) == "active")
+
+    dealer_name_col = _table_col(dealer_sources, "dealer_name", "name", "brand", "website_url")
+    active_dealer_names: list[str] = []
+    active_source_ids: list[int] = []
+
+    if "id" in dealer_sources.c:
+        active_source_ids = [
+            int(row[0])
+            for row in db.execute(
+                select(dealer_sources.c.id).where(active_source_filter)
+            ).fetchall()
+            if row and row[0] is not None
+        ]
+
+    if dealer_name_col is not None:
+        name_rows = db.execute(
+            select(dealer_name_col)
+            .where(active_source_filter, dealer_name_col.is_not(None), func.trim(dealer_name_col) != "")
+            .distinct()
+            .order_by(dealer_name_col.asc())
+        ).fetchall()
+        active_dealer_names = [str(row[0]).strip() for row in name_rows if row and row[0]]
+
+    listing_filters = [_active_listing_filter(listings)]
+    if "vin" in listings.c:
+        listing_filters.append(listings.c.vin.is_not(None))
+    if active_source_ids and "source_id" in listings.c:
+        listing_filters.append(listings.c.source_id.in_(active_source_ids))
+
+    normalized_type_expr = _normalized_listing_vehicle_type_expr(listings)
+    vehicle_counts = {"new": 0, "used": 0}
+
+    if normalized_type_expr is not None and "vin" in listings.c:
+        order_columns = []
+        if "last_seen_at" in listings.c:
+            order_columns.append(listings.c.last_seen_at.desc())
+        elif "updated_at" in listings.c:
+            order_columns.append(listings.c.updated_at.desc())
+        elif "id" in listings.c:
+            order_columns.append(listings.c.id.desc())
+
+        if not order_columns:
+            order_columns.append(listings.c.vin.asc())
+
+        ranked = select(
+            listings.c.vin.label("vin"),
+            normalized_type_expr.label("vehicle_type"),
+            func.row_number()
+            .over(partition_by=listings.c.vin, order_by=order_columns)
+            .label("rn"),
+        ).where(*listing_filters)
+
+        ranked_subquery = ranked.subquery()
+        rows = db.execute(
+            select(ranked_subquery.c.vehicle_type, func.count())
+            .where(
+                ranked_subquery.c.rn == 1,
+                ranked_subquery.c.vehicle_type.is_not(None),
+            )
+            .group_by(ranked_subquery.c.vehicle_type)
+        ).fetchall()
+        for vehicle_type, count in rows:
+            normalized = str(vehicle_type or "").strip().lower()
+            if normalized in vehicle_counts:
+                vehicle_counts[normalized] = int(count or 0)
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "dealers": {
+            "active_count": len(active_dealer_names),
+            "names": active_dealer_names,
+        },
+        "vehicles": {
+            "active_new_count": int(vehicle_counts["new"]),
+            "active_used_count": int(vehicle_counts["used"]),
+            "active_total_count": int(vehicle_counts["new"] + vehicle_counts["used"]),
+        },
     }
 
 
@@ -543,6 +695,58 @@ def upsert_manual_vehicle(
     db.refresh(row)
     offer = db.query(OfferOverride).filter(OfferOverride.vin == normalized_vin).first()
     return {"status": "updated", "item": _serialize_manual_vehicle(row, offer)}
+
+
+@router.post("/manual-vehicles/upload-photo")
+async def upload_manual_vehicle_photo(
+    file: UploadFile = File(...),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    content_type = (file.content_type or "application/octet-stream").lower()
+    suffix = _MANUAL_PHOTO_MIME_SUFFIX.get(content_type)
+    if not suffix:
+        raise HTTPException(status_code=415, detail="Unsupported image type. Use JPG, PNG, or WEBP.")
+
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Image file is required.")
+    if len(payload) > MAX_MANUAL_PHOTO_BYTES:
+        raise HTTPException(status_code=413, detail="Image must be 8MB or smaller.")
+
+    source_filename = (file.filename or "").strip() or f"manual_vehicle{suffix}"
+
+    if cloudinary_is_configured():
+        try:
+            uploaded_url = await upload_image_to_cloudinary(
+                payload,
+                filename=source_filename,
+                content_type=content_type,
+                folder=(settings.cloudinary_upload_folder or "manual-vehicles"),
+            )
+        except CloudinaryUploadError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        return {
+            "url": uploaded_url,
+            "filename": source_filename,
+            "content_type": content_type,
+            "size_bytes": len(payload),
+            "provider": "cloudinary",
+        }
+
+    _MANUAL_PHOTO_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:12]}{suffix}"
+    path = _MANUAL_PHOTO_UPLOAD_DIR / filename
+    path.write_bytes(payload)
+
+    return {
+        "url": f"/uploads/manual-vehicles/{filename}",
+        "filename": filename,
+        "content_type": content_type,
+        "size_bytes": len(payload),
+        "provider": "local",
+    }
 
 
 @router.delete("/manual-vehicles/{vin}")

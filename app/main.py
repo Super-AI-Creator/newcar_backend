@@ -1,9 +1,11 @@
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError
 
 from app.core.deps import get_current_user
@@ -13,6 +15,8 @@ from app.services.sheets_scheduler import SheetsSyncScheduler
 
 app = FastAPI(title="NewCarSuperstore App Backend")
 _sheets_scheduler = SheetsSyncScheduler()
+_uploads_dir = Path(__file__).resolve().parents[1] / "uploads"
+_uploads_dir.mkdir(parents=True, exist_ok=True)
 
 _cors_origins = [
     "http://localhost:3000",
@@ -31,6 +35,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.mount("/uploads", StaticFiles(directory=str(_uploads_dir)), name="uploads")
 
 
 @app.exception_handler(OperationalError)

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import engine
@@ -53,6 +53,105 @@ def _load_offer_map(db: Session, vins):
         return {}
     offers = db.query(OfferOverride).filter(OfferOverride.vin.in_(vins)).all()
     return {offer.vin: offer for offer in offers}
+
+
+def _normalize_ymm_key(year: Optional[int], make: Optional[str], model: Optional[str]):
+    if year is None:
+        return None
+    make_value = (make or "").strip().lower()
+    model_value = (model or "").strip().lower()
+    if not make_value or not model_value:
+        return None
+    return int(year), make_value, model_value
+
+
+def _offer_priority(offer: OfferOverride):
+    source_value = offer.source.value if hasattr(offer.source, "value") else str(offer.source or "")
+    source_rank = {"broker": 3, "sheet": 2, "dealer": 1}.get(str(source_value).lower(), 0)
+    updated_rank = offer.updated_at.timestamp() if getattr(offer, "updated_at", None) else 0
+    return (
+        1 if offer.monthly_payment is not None else 0,
+        1 if offer.discounted_price is not None else 0,
+        source_rank,
+        updated_rank,
+    )
+
+
+def _load_offer_ymm_map(db: Session, keys: set[tuple[int, str, str]]):
+    if not keys:
+        return {}
+
+    offers = db.query(OfferOverride).all()
+    offer_by_vin = {str(row.vin).strip().upper(): row for row in offers if row.vin}
+    offer_vins = sorted(offer_by_vin.keys())
+    if not offer_vins:
+        return {}
+
+    matched_keys: dict[tuple[int, str, str], OfferOverride] = {}
+
+    inventory_query = build_inventory_query(engine, {"vehicle_type": "all"})
+    vin_col = inventory_query.selected_columns.get("vin")
+    rows = []
+    if vin_col is not None:
+        rows = db.execute(inventory_query.where(vin_col.in_(offer_vins))).fetchall()
+
+    matched_vins: set[str] = set()
+    for row in rows:
+        mapping = row._mapping
+        vin = str(mapping.get("vin") or "").strip().upper()
+        if not vin:
+            continue
+        matched_vins.add(vin)
+        offer = offer_by_vin.get(vin)
+        if not offer:
+            continue
+        key = _normalize_ymm_key(mapping.get("year"), mapping.get("make"), mapping.get("model"))
+        if not key or key not in keys:
+            continue
+        current = matched_keys.get(key)
+        if current is None or _offer_priority(offer) > _offer_priority(current):
+            matched_keys[key] = offer
+
+    missing_vins = [vin for vin in offer_vins if vin not in matched_vins]
+    if missing_vins:
+        manual_rows = (
+            db.query(ManualVehicle)
+            .filter(ManualVehicle.vin.in_(missing_vins), ManualVehicle.is_active == True)
+            .all()
+        )
+        for row in manual_rows:
+            vin = str(row.vin or "").strip().upper()
+            if not vin:
+                continue
+            offer = offer_by_vin.get(vin)
+            if not offer:
+                continue
+            key = _normalize_ymm_key(row.year, row.make, row.model)
+            if not key or key not in keys:
+                continue
+            current = matched_keys.get(key)
+            if current is None or _offer_priority(offer) > _offer_priority(current):
+                matched_keys[key] = offer
+
+    return matched_keys
+
+
+def _resolve_offer_for_vehicle(
+    *,
+    vin: Optional[str],
+    year: Optional[int],
+    make: Optional[str],
+    model: Optional[str],
+    offer_map: dict[str, OfferOverride],
+    ymm_offer_map: dict[tuple[int, str, str], OfferOverride],
+):
+    normalized_vin = str(vin or "").strip().upper()
+    if normalized_vin and normalized_vin in offer_map:
+        return offer_map.get(normalized_vin)
+    key = _normalize_ymm_key(year, make, model)
+    if key:
+        return ymm_offer_map.get(key)
+    return None
 
 
 def _normalize_email(value: Optional[str]) -> Optional[str]:
@@ -238,32 +337,45 @@ def inventory_filters(
     if cached is not None:
         return cached
 
-    base_query = build_inventory_query(engine, {"vehicle_type": vehicle_type})
-    base = base_query.subquery()
-    stmt = (
-        select(base.c.make, base.c.model, base.c.trim)
-        .where(base.c.make.is_not(None), base.c.model.is_not(None))
-        .distinct()
-    )
-    if offers_only:
-        stmt = stmt.where(base.c.vin.in_(select(OfferOverride.vin)))
-
-    rows = db.execute(stmt).fetchall()
     manual_rows = db.query(ManualVehicle).filter(ManualVehicle.is_active == True).all()
-    manual_offer_vins: set[str] = set()
-    if offers_only and manual_rows:
-        vins = [str(row.vin).strip().upper() for row in manual_rows if row.vin]
-        if vins:
-            manual_offer_vins = {
-                str(row[0]).strip().upper()
-                for row in db.query(OfferOverride.vin).filter(OfferOverride.vin.in_(vins)).all()
-                if row and row[0]
-            }
+    base_query = build_inventory_query(engine, {"vehicle_type": vehicle_type})
+    rows = db.execute(base_query).fetchall()
+
+    vins = [str(row._mapping.get("vin") or "").strip().upper() for row in rows if row._mapping.get("vin")]
+    offer_map = _load_offer_map(db, vins)
+    ymm_keys_needed: set[tuple[int, str, str]] = set()
+    for row in rows:
+        mapping = row._mapping
+        key = _normalize_ymm_key(mapping.get("year"), mapping.get("make"), mapping.get("model"))
+        if key:
+            ymm_keys_needed.add(key)
+    for row in manual_rows:
+        key = _normalize_ymm_key(row.year, row.make, row.model)
+        if key:
+            ymm_keys_needed.add(key)
+    ymm_offer_map = _load_offer_ymm_map(db, ymm_keys_needed)
+
     models_by_make: dict[str, set[str]] = {}
     trims_by_make_model: dict[str, set[str]] = {}
     makes_set: set[str] = set()
 
-    for make_value, model_value, trim_value in rows:
+    for row in rows:
+        mapping = row._mapping
+        make_value = mapping.get("make")
+        model_value = mapping.get("model")
+        trim_value = mapping.get("trim")
+        if offers_only:
+            offer = _resolve_offer_for_vehicle(
+                vin=mapping.get("vin"),
+                year=mapping.get("year"),
+                make=make_value,
+                model=model_value,
+                offer_map=offer_map,
+                ymm_offer_map=ymm_offer_map,
+            )
+            offer_out = apply_offer_visibility(offer, (mapping.get("vehicle_type") or "").strip().lower())
+            if not offer_out:
+                continue
         make_key = canonicalize_make(str(make_value)) if make_value is not None else None
         model_key = str(model_value).strip() if model_value is not None else ""
         if not make_key or not model_key:
@@ -276,11 +388,20 @@ def inventory_filters(
 
     for row in manual_rows:
         vin = str(row.vin or "").strip().upper()
-        if offers_only and vin not in manual_offer_vins:
-            continue
         row_vehicle_type = (row.vehicle_type or "new").strip().lower()
         if vehicle_type in {"new", "used"} and row_vehicle_type != vehicle_type:
             continue
+        if offers_only:
+            offer = _resolve_offer_for_vehicle(
+                vin=vin,
+                year=row.year,
+                make=row.make,
+                model=row.model,
+                offer_map=offer_map,
+                ymm_offer_map=ymm_offer_map,
+            )
+            if not apply_offer_visibility(offer, row_vehicle_type):
+                continue
         make_value = (row.make or "").strip()
         model_value = (row.model or "").strip()
         trim_value = (row.trim or "").strip()
@@ -359,16 +480,15 @@ def search_inventory(
         "condition": condition,
     }
     base_query = build_inventory_query(engine, filters)
-    if offers_only:
-        vin_col = base_query.selected_columns.get("vin")
-        if vin_col is not None:
-            base_query = base_query.where(vin_col.in_(select(OfferOverride.vin)))
     if max_payment is not None and max_payment > 0:
         fetch_size = min(500, max(page_size * 10, 100))
         offset = 0
     else:
         fetch_size = page_size
         offset = (page - 1) * page_size
+    if offers_only:
+        fetch_size = min(5000, max(fetch_size, page_size * 100, 1000))
+        offset = 0
 
     sort_col = base_query.selected_columns.get("sort_price")
     if sort_col is None:
@@ -386,6 +506,18 @@ def search_inventory(
     rows = db.execute(base_query.limit(fetch_size).offset(offset)).fetchall()
     vins = [r._mapping.get("vin") for r in rows if r._mapping.get("vin")]
     offer_map = _load_offer_map(db, vins)
+    ymm_keys_needed: set[tuple[int, str, str]] = set()
+    for row in rows:
+        mapping = row._mapping
+        key = _normalize_ymm_key(mapping.get("year"), mapping.get("make"), mapping.get("model"))
+        if key:
+            ymm_keys_needed.add(key)
+    manual_rows = db.query(ManualVehicle).filter(ManualVehicle.is_active == True).all()
+    for row in manual_rows:
+        key = _normalize_ymm_key(row.year, row.make, row.model)
+        if key:
+            ymm_keys_needed.add(key)
+    ymm_offer_map = _load_offer_ymm_map(db, ymm_keys_needed)
     dealer_emails = {
         email
         for email in (
@@ -403,8 +535,17 @@ def search_inventory(
         row_vehicle_type = (mapping.get("vehicle_type") or "").lower() or None
         dealer_email = _normalize_email(mapping.get("dealer_email"))
         dealer_phone = mapping.get("dealer_phone") or (dealer_phone_map.get(dealer_email) if dealer_email else None)
-        offer = offer_map.get(vin)
+        offer = _resolve_offer_for_vehicle(
+            vin=vin,
+            year=mapping.get("year"),
+            make=mapping.get("make"),
+            model=mapping.get("model"),
+            offer_map=offer_map,
+            ymm_offer_map=ymm_offer_map,
+        )
         offer_out = apply_offer_visibility(offer, row_vehicle_type)
+        if offers_only and not offer_out:
+            continue
         score = None
         make_value = mapping.get("make")
         model_value = mapping.get("model")
@@ -450,7 +591,6 @@ def search_inventory(
             )
         )
 
-    manual_rows = db.query(ManualVehicle).filter(ManualVehicle.is_active == True).all()
     manual_vins = [str(row.vin).strip().upper() for row in manual_rows if row.vin]
     manual_offer_map = _load_offer_map(db, manual_vins)
     manual_items: list[InventoryItem] = []
@@ -471,12 +611,19 @@ def search_inventory(
             condition=condition,
         ):
             continue
-        offer = manual_offer_map.get(vin)
+        offer = _resolve_offer_for_vehicle(
+            vin=vin,
+            year=row.year,
+            make=row.make,
+            model=row.model,
+            offer_map=manual_offer_map,
+            ymm_offer_map=ymm_offer_map,
+        )
         offer_out = apply_offer_visibility(offer, (row.vehicle_type or "new").strip().lower())
         if offers_only and not offer_out:
             continue
         manual_match_count += 1
-        if (max_payment is None or max_payment <= 0) and page != 1:
+        if (max_payment is None or max_payment <= 0) and page != 1 and not offers_only:
             continue
         manual_items.append(
             InventoryItem(
@@ -525,6 +672,11 @@ def search_inventory(
         if manual_items:
             existing_vins = {str(i.vin).strip().upper() for i in manual_items}
             items = manual_items + [i for i in items if str(i.vin).strip().upper() not in existing_vins]
+        if offers_only:
+            total = len(items)
+            start = (page - 1) * page_size
+            items = items[start : start + page_size]
+        else:
             items = items[:page_size]
 
     response = InventorySearchResponse(items=items, page=page, page_size=page_size, total=total or 0)
@@ -604,6 +756,9 @@ def get_inventory_item(
         if not manual:
             raise HTTPException(status_code=404, detail="VIN not found")
         offer = db.query(OfferOverride).filter(OfferOverride.vin == normalized_vin).first()
+        if not offer:
+            key = _normalize_ymm_key(manual.year, manual.make, manual.model)
+            offer = _load_offer_ymm_map(db, {key} if key else set()).get(key) if key else None
         offer_out = apply_offer_visibility(offer, (manual.vehicle_type or "new").strip().lower())
         return InventoryItem(
             vin=normalized_vin,
@@ -663,6 +818,9 @@ def get_inventory_item(
     if not dealer_phone and dealer_email:
         dealer_phone = _dealer_phone_by_email(db, {dealer_email}).get(dealer_email)
     offer = db.query(OfferOverride).filter(OfferOverride.vin == normalized_vin).first()
+    if not offer:
+        key = _normalize_ymm_key(effective_year, effective_make, effective_model)
+        offer = _load_offer_ymm_map(db, {key} if key else set()).get(key) if key else None
     offer_out = apply_offer_visibility(offer, effective_vehicle_type)
 
     score = None

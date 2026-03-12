@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     lead_webhook_timeout_seconds: int = Field(10)
     lead_webhook_max_attempts: int = Field(3)
     lead_webhook_retry_backoff_seconds: float = Field(1.0)
+    cloudinary_cloud_name: Optional[str] = Field(None)
+    cloudinary_api_key: Optional[str] = Field(None)
+    cloudinary_api_secret: Optional[str] = Field(None)
+    cloudinary_upload_folder: str = Field("manual-vehicles")
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
