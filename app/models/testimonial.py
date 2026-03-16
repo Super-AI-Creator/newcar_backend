@@ -10,6 +10,7 @@ class Testimonial(Base):
     title = Column(String(255), nullable=True)
     quote = Column(Text, nullable=False)
     author = Column(String(255), nullable=False)
+    image_url = Column(String(1024), nullable=True)
     sort_order = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())

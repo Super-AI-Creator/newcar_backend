@@ -23,6 +23,7 @@ def list_testimonials(db: Session = Depends(get_db)):
             "title": row.title,
             "quote": row.quote,
             "author": row.author,
+            "image_url": getattr(row, "image_url", None),
         }
         for row in rows
     ]

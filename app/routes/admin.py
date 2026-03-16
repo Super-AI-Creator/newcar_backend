@@ -22,6 +22,7 @@ from app.models.model_score import ModelScore
 from app.models.seo_page_setting import SeoPageSetting
 from app.models.landing_page_content import LandingPageContent
 from app.models.sheet_sources_meta import SheetSourceMeta
+from app.models.testimonial import Testimonial
 from app.services.cloudinary import CloudinaryUploadError, cloudinary_is_configured, upload_image_to_cloudinary
 from app.services.offers import set_offer_visibility
 from app.services.lead_delivery import build_lead_webhook_payload, is_lead_webhook_enabled, send_lead_webhook
@@ -955,6 +956,130 @@ def admin_upsert_landing_page(
     db.commit()
     db.refresh(row)
     return {"status": "updated", "content": current}
+
+
+# ---------- Testimonials (super_admin) ----------
+class TestimonialUpsert(BaseModel):
+    author: Optional[str] = None
+    title: Optional[str] = None
+    quote: Optional[str] = None
+    image_url: Optional[str] = None
+    sort_order: Optional[int] = None
+
+
+@router.get("/testimonials")
+def admin_list_testimonials(
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    rows = db.query(Testimonial).order_by(Testimonial.sort_order.asc(), Testimonial.id.asc()).all()
+    return {
+        "items": [
+            {
+                "id": int(row.id),
+                "author": row.author,
+                "title": row.title,
+                "quote": row.quote,
+                "image_url": getattr(row, "image_url", None),
+                "sort_order": int(row.sort_order or 0),
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.post("/testimonials")
+def admin_create_testimonial(
+    payload: TestimonialUpsert,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    if not (payload.author or "").strip():
+        raise HTTPException(status_code=400, detail="author is required.")
+    if not (payload.quote or "").strip():
+        raise HTTPException(status_code=400, detail="quote is required.")
+
+    row = Testimonial(
+        author=payload.author.strip(),
+        quote=payload.quote.strip(),
+        title=(payload.title.strip() if payload.title else None),
+        image_url=(payload.image_url.strip() if payload.image_url else None),
+        sort_order=int(payload.sort_order or 0),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {
+        "status": "created",
+        "item": {
+            "id": int(row.id),
+            "author": row.author,
+            "title": row.title,
+            "quote": row.quote,
+            "image_url": getattr(row, "image_url", None),
+            "sort_order": int(row.sort_order or 0),
+        },
+    }
+
+
+@router.put("/testimonials/{testimonial_id}")
+def admin_update_testimonial(
+    testimonial_id: int,
+    payload: TestimonialUpsert,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    row = db.query(Testimonial).filter(Testimonial.id == testimonial_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Testimonial not found.")
+
+    if payload.author is not None:
+        row.author = payload.author.strip()
+    if payload.quote is not None:
+        row.quote = payload.quote.strip()
+    if payload.title is not None:
+        row.title = payload.title.strip() if payload.title else None
+    if payload.image_url is not None:
+        row.image_url = payload.image_url.strip() if payload.image_url else None
+    if payload.sort_order is not None:
+        row.sort_order = int(payload.sort_order or 0)
+
+    if not (row.author or "").strip():
+        raise HTTPException(status_code=400, detail="author is required.")
+    if not (row.quote or "").strip():
+        raise HTTPException(status_code=400, detail="quote is required.")
+
+    db.commit()
+    db.refresh(row)
+    return {
+        "status": "updated",
+        "item": {
+            "id": int(row.id),
+            "author": row.author,
+            "title": row.title,
+            "quote": row.quote,
+            "image_url": getattr(row, "image_url", None),
+            "sort_order": int(row.sort_order or 0),
+        },
+    }
+
+
+@router.delete("/testimonials/{testimonial_id}")
+def admin_delete_testimonial(
+    testimonial_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    row = db.query(Testimonial).filter(Testimonial.id == testimonial_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Testimonial not found.")
+    db.delete(row)
+    db.commit()
+    return {"deleted": True, "id": testimonial_id}
 
 
 @router.get("/offer-overrides")
