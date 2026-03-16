@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError
 
 from app.core.deps import get_current_user
-from app.routes import auth, inventory, favorites, broker, credit, docs, admin, dealer, payments, recommendations, vehicles, search_compat, frontend_compat, testimonials, deals, lenders, leads, webhooks, seo
+from app.routes import auth, inventory, favorites, broker, credit, docs, admin, dealer, payments, recommendations, vehicles, search_compat, frontend_compat, testimonials, deals, lenders, leads, webhooks, seo, credit_unions, landing
 from app.schemas.user import UserOut
 from app.services.sheets_scheduler import SheetsSyncScheduler
 
@@ -115,3 +115,5 @@ app.include_router(lenders.router)
 app.include_router(leads.router)
 app.include_router(webhooks.router)
 app.include_router(seo.router)
+app.include_router(credit_unions.router)
+app.include_router(landing.router)

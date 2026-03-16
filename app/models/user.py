@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, Column, DateTime, Enum, String, Boolean, func
+from sqlalchemy import BigInteger, Column, DateTime, Enum, ForeignKey, String, Boolean, func
 from app.models.base import Base
 from app.models.enums import UserRole
 
@@ -12,6 +12,7 @@ class User(Base):
     name = Column(String(255), nullable=False)
     password_hash = Column(String(255), nullable=True)
     role = Column(Enum(UserRole), nullable=False, index=True)
+    credit_union_id = Column(BigInteger, ForeignKey("credit_unions.id", ondelete="SET NULL"), nullable=True, index=True)
     is_phone_verified = Column(Boolean, nullable=False, default=False)
     is_email_verified = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, nullable=False, server_default=func.now())

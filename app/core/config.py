@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     cloudinary_api_secret: Optional[str] = Field(None)
     cloudinary_upload_folder: str = Field("manual-vehicles")
 
+    twilio_account_sid: Optional[str] = Field(None)
+    twilio_auth_token: Optional[str] = Field(None)
+    twilio_from_phone: Optional[str] = Field(None)
+    frontend_base_url: str = Field("https://newcarsuperstore.com")
+
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
 

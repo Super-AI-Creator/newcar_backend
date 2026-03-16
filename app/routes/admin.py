@@ -20,6 +20,7 @@ from app.models.manual_vehicle import ManualVehicle
 from app.models.offer_override import OfferOverride
 from app.models.model_score import ModelScore
 from app.models.seo_page_setting import SeoPageSetting
+from app.models.landing_page_content import LandingPageContent
 from app.models.sheet_sources_meta import SheetSourceMeta
 from app.services.cloudinary import CloudinaryUploadError, cloudinary_is_configured, upload_image_to_cloudinary
 from app.services.offers import set_offer_visibility
@@ -848,6 +849,112 @@ def delete_seo_setting(
     db.delete(row)
     db.commit()
     return {"deleted": True, "page_key": normalized_key}
+
+
+# ---------- Landing page content (super_admin) ----------
+class LandingHeroPayload(BaseModel):
+    kicker: Optional[str] = None
+    headline: Optional[str] = None
+    subtext: Optional[str] = None
+    slide_urls: Optional[list[str]] = None
+
+
+class LandingLeasePayload(BaseModel):
+    title: Optional[str] = None
+    subtitle: Optional[str] = None
+
+
+class LandingHowItWorksStep(BaseModel):
+    image_url: Optional[str] = None
+    label: Optional[str] = None
+
+
+class LandingPagePayload(BaseModel):
+    hero: Optional[LandingHeroPayload] = None
+    lease: Optional[LandingLeasePayload] = None
+    how_it_works: Optional[list[LandingHowItWorksStep]] = None
+
+
+def _landing_default() -> dict:
+    return {
+        "hero": {
+            "kicker": "SHOP,  GET APPROVED AND GET THE CAR DELIVERED TO YOUR DOOR WITH A RED BOW",
+            "headline": "Buy Any New Car in California Without the Dealership",
+            "subtext": "SHOP, GET APPROVED AND GET THE CAR DELIVERED TO YOUR DOOR WITH A RED BOW.",
+            "slide_urls": [
+                "/images/landing_img (1).jpg",
+                "/images/landing_img (2).jpg",
+                "/images/landing_img (3).jpg",
+                "/images/landing_img (4).jpg",
+            ],
+        },
+        "lease": {
+            "title": "Current Lease Specials Los Angeles",
+            "subtitle": "Shop and compare hundreds of lease offers, if they make it, we have it! 818-705-9200",
+        },
+        "how_it_works": [
+            {"image_url": "/images/hero-cars.jpg", "label": "Browse Statewide Inventory"},
+            {"image_url": "/images/deal-1.jpg", "label": "Get Your Best Rate"},
+            {"image_url": "/images/landing_img (1).jpg", "label": "Home Delivery With a Bow"},
+        ],
+    }
+
+
+@router.get("/landing-page")
+def admin_get_landing_page(db: Session = Depends(get_db), user=Depends(require_role("super_admin"))):
+    _ = user
+    row = db.query(LandingPageContent).filter(LandingPageContent.id == 1).first()
+    if not row or not row.content or not row.content.strip():
+        return _landing_default()
+    try:
+        data = json.loads(row.content)
+        return data if isinstance(data, dict) else _landing_default()
+    except Exception:
+        return _landing_default()
+
+
+@router.put("/landing-page")
+def admin_upsert_landing_page(
+    payload: LandingPagePayload,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    row = db.query(LandingPageContent).filter(LandingPageContent.id == 1).first()
+    if not row:
+        row = LandingPageContent(id=1)
+        db.add(row)
+    current = _landing_default()
+    if row.content and row.content.strip():
+        try:
+            current = json.loads(row.content)
+            if not isinstance(current, dict):
+                current = _landing_default()
+        except Exception:
+            pass
+    if payload.hero is not None:
+        if payload.hero.kicker is not None:
+            current.setdefault("hero", {})["kicker"] = payload.hero.kicker
+        if payload.hero.headline is not None:
+            current.setdefault("hero", {})["headline"] = payload.hero.headline
+        if payload.hero.subtext is not None:
+            current.setdefault("hero", {})["subtext"] = payload.hero.subtext
+        if payload.hero.slide_urls is not None:
+            current.setdefault("hero", {})["slide_urls"] = payload.hero.slide_urls
+    if payload.lease is not None:
+        if payload.lease.title is not None:
+            current.setdefault("lease", {})["title"] = payload.lease.title
+        if payload.lease.subtitle is not None:
+            current.setdefault("lease", {})["subtitle"] = payload.lease.subtitle
+    if payload.how_it_works is not None:
+        current["how_it_works"] = [
+            {"image_url": s.image_url or "", "label": s.label or ""}
+            for s in payload.how_it_works
+        ]
+    row.content = json.dumps(current)
+    db.commit()
+    db.refresh(row)
+    return {"status": "updated", "content": current}
 
 
 @router.get("/offer-overrides")

@@ -19,6 +19,7 @@ from app.core.security import (
 )
 from app.models.auth_otp import AuthOtp
 from app.models.enums import OtpChannel, UserRole
+from app.models.credit_union import CreditUnion
 from app.models.user import User
 from app.schemas.auth import (
     GoogleAuthRequest,
@@ -93,10 +94,20 @@ def request_otp(data: RegisterRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=409, detail="User already registered. Please log in.")
 
     password_hash = hash_password(data.password)
+    credit_union_id = None
+    if data.cu_signup_token and data.cu_signup_token.strip():
+        cu = db.query(CreditUnion).filter(
+            CreditUnion.signup_token == data.cu_signup_token.strip(),
+            CreditUnion.is_active == True,
+        ).first()
+        if cu:
+            credit_union_id = cu.id
     if user:
         user.name = data.name
         user.phone = data.phone
         user.password_hash = password_hash
+        if credit_union_id is not None:
+            user.credit_union_id = credit_union_id
     else:
         user = User(
             email=data.email,
@@ -104,6 +115,7 @@ def request_otp(data: RegisterRequest, db: Session = Depends(get_db)):
             name=data.name,
             password_hash=password_hash,
             role=UserRole.customer,
+            credit_union_id=credit_union_id,
             is_email_verified=False,
             is_phone_verified=False,
         )
@@ -179,6 +191,13 @@ def verify_otp(data: RegisterVerifyRequest, db: Session = Depends(get_db)):
         user.is_email_verified = True
     if channel == OtpChannel.sms:
         user.is_phone_verified = True
+    if data.cu_signup_token and data.cu_signup_token.strip():
+        cu = db.query(CreditUnion).filter(
+            CreditUnion.signup_token == data.cu_signup_token.strip(),
+            CreditUnion.is_active == True,
+        ).first()
+        if cu:
+            user.credit_union_id = cu.id
     db.commit()
 
     return {"registered": True, "message": "Registration verified. You can now log in with email and password."}

@@ -6,6 +6,7 @@ class UserRole(str, enum.Enum):
     dealer = "dealer"
     broker_admin = "broker_admin"
     super_admin = "super_admin"
+    credit_union = "credit_union"
 
 
 class OtpChannel(str, enum.Enum):

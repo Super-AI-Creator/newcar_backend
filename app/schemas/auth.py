@@ -31,12 +31,14 @@ class RegisterRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     phone: Optional[str] = Field(default=None, max_length=50)
     channel: str = Field(default="email", pattern="^(email|sms)$")
+    cu_signup_token: Optional[str] = Field(default=None, max_length=128)
 
 
 class RegisterVerifyRequest(BaseModel):
     email: EmailStr
     code: str
     channel: str = Field(default="email", pattern="^(email|sms)$")
+    cu_signup_token: Optional[str] = Field(default=None, max_length=128)
 
 
 class LoginRequest(BaseModel):

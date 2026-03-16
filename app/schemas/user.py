@@ -13,6 +13,7 @@ class UserOut(BaseModel):
     phone: Optional[str]
     name: str
     role: str
+    credit_union_id: Optional[int] = None
     is_phone_verified: bool
     is_email_verified: bool
 

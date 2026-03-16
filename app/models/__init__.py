@@ -16,6 +16,8 @@ from app.models.lead_request import LeadRequest
 from app.models.homepage_featured_vehicle import HomepageFeaturedVehicle
 from app.models.manual_vehicle import ManualVehicle
 from app.models.seo_page_setting import SeoPageSetting
+from app.models.credit_union import CreditUnion, CreditUnionLoanProgram, CreditUnionDisclosure, CuMemberApproval
+from app.models.landing_page_content import LandingPageContent
 
 __all__ = [
     "Base",
@@ -36,4 +38,9 @@ __all__ = [
     "HomepageFeaturedVehicle",
     "ManualVehicle",
     "SeoPageSetting",
+    "CreditUnion",
+    "CreditUnionLoanProgram",
+    "CreditUnionDisclosure",
+    "CuMemberApproval",
+    "LandingPageContent",
 ]
