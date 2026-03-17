@@ -23,6 +23,7 @@ from app.models.seo_page_setting import SeoPageSetting
 from app.models.landing_page_content import LandingPageContent
 from app.models.sheet_sources_meta import SheetSourceMeta
 from app.models.testimonial import Testimonial
+from app.models.article import Article
 from app.services.cloudinary import CloudinaryUploadError, cloudinary_is_configured, upload_image_to_cloudinary
 from app.services.offers import set_offer_visibility
 from app.services.lead_delivery import build_lead_webhook_payload, is_lead_webhook_enabled, send_lead_webhook
@@ -100,7 +101,7 @@ def lead_delivery_logs(
     q: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
-    user=Depends(require_role("broker_admin")),
+    user=Depends(require_role("broker_admin", "super_admin")),
 ):
     query = db.query(LeadRequest)
     if status in {"pending", "sent", "failed", "skipped"}:
@@ -125,7 +126,9 @@ def lead_delivery_logs(
                 "email": row.email,
                 "phone": row.phone,
                 "vin": row.vin,
+                "vehicle": row.vehicle,
                 "source": row.source,
+                "notes": row.notes,
                 "webhook_status": row.webhook_status,
                 "webhook_attempts": int(row.webhook_attempts or 0),
                 "webhook_last_error": row.webhook_last_error,
@@ -142,7 +145,7 @@ def retry_lead_delivery(
     lead_id: int,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    user=Depends(require_role("broker_admin")),
+    user=Depends(require_role("broker_admin", "super_admin")),
 ):
     if not is_lead_webhook_enabled():
         raise HTTPException(status_code=400, detail="Lead webhook is not configured.")
@@ -1080,6 +1083,131 @@ def admin_delete_testimonial(
     db.delete(row)
     db.commit()
     return {"deleted": True, "id": testimonial_id}
+
+
+# ---------- Articles (super_admin) ----------
+class ArticleUpsert(BaseModel):
+    title: str
+    description: Optional[str] = None
+    slug: str
+    date: str  # YYYY-MM-DD
+    content: str = ""
+
+
+@router.get("/articles")
+def admin_list_articles(
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    rows = db.query(Article).order_by(Article.date.desc(), Article.id.desc()).all()
+    return {
+        "items": [
+            {
+                "id": int(row.id),
+                "title": row.title,
+                "description": row.description,
+                "slug": row.slug,
+                "date": row.date,
+                "content": row.content,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.post("/articles")
+def admin_create_article(
+    payload: ArticleUpsert,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    title = (payload.title or "").strip()
+    slug = (payload.slug or "").strip().lower().replace(" ", "-")
+    if not title:
+        raise HTTPException(status_code=400, detail="Title is required.")
+    if not slug:
+        raise HTTPException(status_code=400, detail="Slug is required.")
+    if db.query(Article).filter(Article.slug == slug).first():
+        raise HTTPException(status_code=400, detail="An article with this slug already exists.")
+    date = (payload.date or "").strip() or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    row = Article(
+        title=title,
+        description=(payload.description or "").strip() or None,
+        slug=slug,
+        date=date,
+        content=(payload.content or "").strip() or "",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {
+        "status": "created",
+        "item": {
+            "id": int(row.id),
+            "title": row.title,
+            "description": row.description,
+            "slug": row.slug,
+            "date": row.date,
+            "content": row.content,
+        },
+    }
+
+
+@router.put("/articles/{article_id}")
+def admin_update_article(
+    article_id: int,
+    payload: ArticleUpsert,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    row = db.query(Article).filter(Article.id == article_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Article not found.")
+    title = (payload.title or "").strip()
+    slug = (payload.slug or "").strip().lower().replace(" ", "-")
+    if not title:
+        raise HTTPException(status_code=400, detail="Title is required.")
+    if not slug:
+        raise HTTPException(status_code=400, detail="Slug is required.")
+    existing = db.query(Article).filter(Article.slug == slug, Article.id != article_id).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Another article already has this slug.")
+    row.title = title
+    row.description = (payload.description or "").strip() or None
+    row.slug = slug
+    row.date = (payload.date or "").strip() or row.date
+    row.content = (payload.content or "").strip() or ""
+    db.commit()
+    db.refresh(row)
+    return {
+        "status": "updated",
+        "item": {
+            "id": int(row.id),
+            "title": row.title,
+            "description": row.description,
+            "slug": row.slug,
+            "date": row.date,
+            "content": row.content,
+        },
+    }
+
+
+@router.delete("/articles/{article_id}")
+def admin_delete_article(
+    article_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    row = db.query(Article).filter(Article.id == article_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Article not found.")
+    db.delete(row)
+    db.commit()
+    return {"deleted": True, "id": article_id}
 
 
 @router.get("/offer-overrides")

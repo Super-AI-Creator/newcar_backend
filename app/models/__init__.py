@@ -18,6 +18,7 @@ from app.models.manual_vehicle import ManualVehicle
 from app.models.seo_page_setting import SeoPageSetting
 from app.models.credit_union import CreditUnion, CreditUnionLoanProgram, CreditUnionDisclosure, CuMemberApproval
 from app.models.landing_page_content import LandingPageContent
+from app.models.article import Article
 
 __all__ = [
     "Base",
@@ -43,4 +44,5 @@ __all__ = [
     "CreditUnionDisclosure",
     "CuMemberApproval",
     "LandingPageContent",
+    "Article",
 ]

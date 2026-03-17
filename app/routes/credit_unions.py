@@ -41,6 +41,9 @@ class CreditUnionCreate(BaseModel):
     name: str
     slug: Optional[str] = None
     logo_url: Optional[str] = None
+    banner_url: Optional[str] = None
+    hero_title: Optional[str] = None
+    hero_subtitle: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
     contact_name: Optional[str] = None
@@ -54,6 +57,9 @@ class CreditUnionUpdate(BaseModel):
     name: Optional[str] = None
     slug: Optional[str] = None
     logo_url: Optional[str] = None
+    banner_url: Optional[str] = None
+    hero_title: Optional[str] = None
+    hero_subtitle: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
     contact_name: Optional[str] = None
@@ -70,6 +76,9 @@ def _serialize_cu(cu: CreditUnion, include_relations: bool = True) -> dict:
         "name": cu.name,
         "slug": cu.slug,
         "logo_url": cu.logo_url,
+        "banner_url": cu.banner_url,
+        "hero_title": cu.hero_title,
+        "hero_subtitle": cu.hero_subtitle,
         "phone": cu.phone,
         "address": cu.address,
         "contact_name": cu.contact_name,
@@ -139,6 +148,9 @@ def admin_create_credit_union(
         name=payload.name.strip(),
         slug=slug,
         logo_url=(payload.logo_url or "").strip() or None,
+        banner_url=(payload.banner_url or "").strip() or None,
+        hero_title=(payload.hero_title or "").strip() or None,
+        hero_subtitle=(payload.hero_subtitle or "").strip() or None,
         phone=(payload.phone or "").strip() or None,
         address=(payload.address or "").strip() or None,
         contact_name=(payload.contact_name or "").strip() or None,
@@ -227,6 +239,12 @@ def admin_update_credit_union(
         cu.slug = slug
     if payload.logo_url is not None:
         cu.logo_url = (payload.logo_url or "").strip() or None
+    if payload.banner_url is not None:
+        cu.banner_url = (payload.banner_url or "").strip() or None
+    if payload.hero_title is not None:
+        cu.hero_title = (payload.hero_title or "").strip() or None
+    if payload.hero_subtitle is not None:
+        cu.hero_subtitle = (payload.hero_subtitle or "").strip() or None
     if payload.phone is not None:
         cu.phone = (payload.phone or "").strip() or None
     if payload.address is not None:
