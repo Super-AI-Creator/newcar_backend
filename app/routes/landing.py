@@ -1,5 +1,6 @@
 """Public landing page content (no auth)."""
 import json
+import time
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -8,6 +9,8 @@ from app.core.deps import get_db
 from app.models.landing_page_content import LandingPageContent
 
 router = APIRouter(tags=["landing"])
+_LANDING_CACHE: dict[str, tuple[float, dict]] = {}
+_LANDING_CACHE_TTL_SECONDS = 60.0
 
 
 def _default_content() -> dict:
@@ -38,11 +41,23 @@ def _default_content() -> dict:
 
 @router.get("/landing-page")
 def get_landing_page(db: Session = Depends(get_db)):
+    cache_key = "landing-page"
+    now = time.time()
+    cached = _LANDING_CACHE.get(cache_key)
+    if cached:
+        expires_at, payload = cached
+        if now < expires_at:
+            return payload
+
     row = db.query(LandingPageContent).filter(LandingPageContent.id == 1).first()
     if not row or not row.content or not row.content.strip():
-        return _default_content()
+        payload = _default_content()
+        _LANDING_CACHE[cache_key] = (now + _LANDING_CACHE_TTL_SECONDS, payload)
+        return payload
     try:
         data = json.loads(row.content)
-        return data if isinstance(data, dict) else _default_content()
+        payload = data if isinstance(data, dict) else _default_content()
     except Exception:
-        return _default_content()
+        payload = _default_content()
+    _LANDING_CACHE[cache_key] = (now + _LANDING_CACHE_TTL_SECONDS, payload)
+    return payload

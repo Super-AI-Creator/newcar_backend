@@ -31,6 +31,8 @@ _FILTERS_CACHE_TTL_SECONDS = 30.0
 _FILTERS_CACHE_MAX_ENTRIES = 64
 _MONTH_KEY_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _MAX_HOMEPAGE_FEATURED_VEHICLES = 6
+_HOMEPAGE_SPECIALS_CACHE: dict[str, tuple[float, dict]] = {}
+_HOMEPAGE_SPECIALS_CACHE_TTL_SECONDS = 60.0
 
 
 def _serialize_details(raw):
@@ -697,6 +699,13 @@ def homepage_specials(
     db: Session = Depends(get_db),
 ):
     month_key = _resolve_month_key(month)
+    cache_key = f"limit={limit}|month={month_key}"
+    now = time.time()
+    cached = _HOMEPAGE_SPECIALS_CACHE.get(cache_key)
+    if cached:
+        expires_at, payload = cached
+        if now < expires_at:
+            return InventorySearchResponse(**payload)
     featured_rows = (
         db.query(HomepageFeaturedVehicle)
         .filter(HomepageFeaturedVehicle.month_key == month_key)
@@ -736,12 +745,15 @@ def homepage_specials(
             if len(items) >= limit:
                 break
 
-    return InventorySearchResponse(
+    response = InventorySearchResponse(
         items=items[:limit],
         page=1,
         page_size=limit,
         total=len(items[:limit]),
     )
+    payload = response.model_dump() if hasattr(response, "model_dump") else response.dict()
+    _HOMEPAGE_SPECIALS_CACHE[cache_key] = (now + _HOMEPAGE_SPECIALS_CACHE_TTL_SECONDS, payload)
+    return response
 
 
 @router.get("/{vin}", response_model=InventoryItem, response_model_exclude_none=True)
