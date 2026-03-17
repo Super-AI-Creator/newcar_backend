@@ -22,15 +22,16 @@ def _default_content() -> dict:
                 "/images/landing_img (3).jpg",
                 "/images/landing_img (4).jpg",
             ],
+            "slide_focus": ["center", "center", "center", "center"],
         },
         "lease": {
             "title": "Current Lease Specials Los Angeles",
             "subtitle": "Shop and compare hundreds of lease offers, if they make it, we have it! 818-705-9200",
         },
         "how_it_works": [
-            {"image_url": "/images/hero-cars.jpg", "label": "Browse Statewide Inventory"},
-            {"image_url": "/images/deal-1.jpg", "label": "Get Your Best Rate"},
-            {"image_url": "/images/landing_img (1).jpg", "label": "Home Delivery With a Bow"},
+            {"image_url": "/images/hero-cars.jpg", "label": "Browse Statewide Inventory", "image_focus": "center"},
+            {"image_url": "/images/deal-1.jpg", "label": "Get Your Best Rate", "image_focus": "center"},
+            {"image_url": "/images/landing_img (1).jpg", "label": "Home Delivery With a Bow", "image_focus": "center"},
         ],
     }
 

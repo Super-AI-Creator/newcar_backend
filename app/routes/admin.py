@@ -861,6 +861,7 @@ class LandingHeroPayload(BaseModel):
     headline: Optional[str] = None
     subtext: Optional[str] = None
     slide_urls: Optional[list[str]] = None
+    slide_focus: Optional[list[str]] = None
 
 
 class LandingLeasePayload(BaseModel):
@@ -871,6 +872,7 @@ class LandingLeasePayload(BaseModel):
 class LandingHowItWorksStep(BaseModel):
     image_url: Optional[str] = None
     label: Optional[str] = None
+    image_focus: Optional[str] = None
 
 
 class LandingPagePayload(BaseModel):
@@ -891,15 +893,16 @@ def _landing_default() -> dict:
                 "/images/landing_img (3).jpg",
                 "/images/landing_img (4).jpg",
             ],
+            "slide_focus": ["center", "center", "center", "center"],
         },
         "lease": {
             "title": "Current Lease Specials Los Angeles",
             "subtitle": "Shop and compare hundreds of lease offers, if they make it, we have it! 818-705-9200",
         },
         "how_it_works": [
-            {"image_url": "/images/hero-cars.jpg", "label": "Browse Statewide Inventory"},
-            {"image_url": "/images/deal-1.jpg", "label": "Get Your Best Rate"},
-            {"image_url": "/images/landing_img (1).jpg", "label": "Home Delivery With a Bow"},
+            {"image_url": "/images/hero-cars.jpg", "label": "Browse Statewide Inventory", "image_focus": "center"},
+            {"image_url": "/images/deal-1.jpg", "label": "Get Your Best Rate", "image_focus": "center"},
+            {"image_url": "/images/landing_img (1).jpg", "label": "Home Delivery With a Bow", "image_focus": "center"},
         ],
     }
 
@@ -945,6 +948,8 @@ def admin_upsert_landing_page(
             current.setdefault("hero", {})["subtext"] = payload.hero.subtext
         if payload.hero.slide_urls is not None:
             current.setdefault("hero", {})["slide_urls"] = payload.hero.slide_urls
+        if payload.hero.slide_focus is not None:
+            current.setdefault("hero", {})["slide_focus"] = payload.hero.slide_focus
     if payload.lease is not None:
         if payload.lease.title is not None:
             current.setdefault("lease", {})["title"] = payload.lease.title
@@ -952,7 +957,11 @@ def admin_upsert_landing_page(
             current.setdefault("lease", {})["subtitle"] = payload.lease.subtitle
     if payload.how_it_works is not None:
         current["how_it_works"] = [
-            {"image_url": s.image_url or "", "label": s.label or ""}
+            {
+                "image_url": s.image_url or "",
+                "label": s.label or "",
+                "image_focus": (s.image_focus or "").strip() or "center",
+            }
             for s in payload.how_it_works
         ]
     row.content = json.dumps(current)

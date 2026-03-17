@@ -83,6 +83,54 @@ def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
     return TokenResponse(access_token=access, refresh_token=refresh)
 
 
+@router.post("/register")
+def register(data: RegisterRequest, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(User.email == data.email).first()
+    if existing:
+        if existing.password_hash:
+            raise HTTPException(
+                status_code=409,
+                detail="User already registered. Please log in.",
+            )
+        # If a user exists without a password hash, treat as incomplete legacy record.
+        db.delete(existing)
+        db.commit()
+
+    password_hash = hash_password(data.password)
+
+    credit_union_id = None
+    if data.cu_signup_token and data.cu_signup_token.strip():
+        cu = (
+            db.query(CreditUnion)
+            .filter(
+                CreditUnion.signup_token == data.cu_signup_token.strip(),
+                CreditUnion.is_active == True,
+            )
+            .first()
+        )
+        if cu:
+            credit_union_id = cu.id
+
+    user = User(
+        email=data.email,
+        phone=data.phone,
+        name=data.name,
+        password_hash=password_hash,
+        role=UserRole.customer,
+        credit_union_id=credit_union_id,
+        is_email_verified=True,
+        is_phone_verified=bool(data.phone),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "registered": True,
+        "message": "Registration complete. You can now log in with email and password.",
+    }
+
+
 @router.post("/register/request-otp")
 @router.post("/request-otp")
 @router.post("/otp/request")
