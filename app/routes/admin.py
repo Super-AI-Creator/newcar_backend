@@ -882,10 +882,19 @@ class LandingHowItWorksStep(BaseModel):
     image_focus: Optional[str] = None
 
 
+class LandingFooterPayload(BaseModel):
+    facebook_url: Optional[str] = None
+    twitter_url: Optional[str] = None
+    google_plus_url: Optional[str] = None
+    instagram_url: Optional[str] = None
+    youtube_url: Optional[str] = None
+
+
 class LandingPagePayload(BaseModel):
     hero: Optional[LandingHeroPayload] = None
     lease: Optional[LandingLeasePayload] = None
     how_it_works: Optional[list[LandingHowItWorksStep]] = None
+    footer: Optional[LandingFooterPayload] = None
 
 
 def _landing_default() -> dict:
@@ -911,6 +920,13 @@ def _landing_default() -> dict:
             {"image_url": "/images/deal-1.jpg", "label": "Get Your Best Rate", "image_focus": "center"},
             {"image_url": "/images/landing_img (1).jpg", "label": "Home Delivery With a Bow", "image_focus": "center"},
         ],
+        "footer": {
+            "facebook_url": "https://www.facebook.com/newcarsuperstore/",
+            "twitter_url": "https://twitter.com/autobrokerla",
+            "google_plus_url": "https://plus.google.com/101810114903929491113",
+            "instagram_url": "https://www.instagram.com/newcarsuperstore/",
+            "youtube_url": "https://www.youtube.com/channel/UCfnPH7n_x1cHc5WXDb0zMJQ",
+        },
     }
 
 
@@ -971,6 +987,17 @@ def admin_upsert_landing_page(
             }
             for s in payload.how_it_works
         ]
+    if payload.footer is not None:
+        if payload.footer.facebook_url is not None:
+            current.setdefault("footer", {})["facebook_url"] = payload.footer.facebook_url
+        if payload.footer.twitter_url is not None:
+            current.setdefault("footer", {})["twitter_url"] = payload.footer.twitter_url
+        if payload.footer.google_plus_url is not None:
+            current.setdefault("footer", {})["google_plus_url"] = payload.footer.google_plus_url
+        if payload.footer.instagram_url is not None:
+            current.setdefault("footer", {})["instagram_url"] = payload.footer.instagram_url
+        if payload.footer.youtube_url is not None:
+            current.setdefault("footer", {})["youtube_url"] = payload.footer.youtube_url
     row.content = json.dumps(current)
     db.commit()
     db.refresh(row)

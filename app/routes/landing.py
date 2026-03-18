@@ -36,6 +36,13 @@ def _default_content() -> dict:
             {"image_url": "/images/deal-1.jpg", "label": "Get Your Best Rate", "image_focus": "center"},
             {"image_url": "/images/landing_img (1).jpg", "label": "Home Delivery With a Bow", "image_focus": "center"},
         ],
+        "footer": {
+            "facebook_url": "https://www.facebook.com/newcarsuperstore/",
+            "twitter_url": "https://twitter.com/autobrokerla",
+            "google_plus_url": "https://plus.google.com/101810114903929491113",
+            "instagram_url": "https://www.instagram.com/newcarsuperstore/",
+            "youtube_url": "https://www.youtube.com/channel/UCfnPH7n_x1cHc5WXDb0zMJQ",
+        },
     }
 
 
