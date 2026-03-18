@@ -72,7 +72,7 @@ async def handle_http_exception(request: Request, exc: HTTPException):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return JSONResponse(content={"status": "ok"}, status_code=200, media_type="application/json")
 
 
 @app.on_event("startup")

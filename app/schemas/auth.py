@@ -44,3 +44,13 @@ class RegisterVerifyRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+
+
+class ProfileUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    phone: Optional[str] = Field(default=None, max_length=50)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)

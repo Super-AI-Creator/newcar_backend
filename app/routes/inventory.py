@@ -508,7 +508,9 @@ def search_inventory(
         total = None
 
     if offers_only:
-        rows = db.execute(base_query).fetchall()
+        # offers_only is typically used for "featured specials" style lists.
+        # Always apply LIMIT/OFFSET; otherwise we accidentally fetch the entire inventory.
+        rows = db.execute(base_query.limit(page_size).offset(offset)).fetchall()
     else:
         rows = db.execute(base_query.limit(fetch_size).offset(offset)).fetchall()
     vins = [r._mapping.get("vin") for r in rows if r._mapping.get("vin")]
@@ -715,20 +717,185 @@ def homepage_specials(
     items: list[InventoryItem] = []
     seen_vins: set[str] = set()
 
+    # Fast path: if super-admin precomputed the landing-card payload, return it directly.
+    cached_items_by_vin: dict[str, InventoryItem] = {}
+    for r in featured_rows:
+        vin = str(r.vin or "").strip().upper()
+        if not vin:
+            continue
+        payload_raw = getattr(r, "card_payload_json", None)
+        if not payload_raw:
+            continue
+        try:
+            payload = json.loads(payload_raw)
+            cached_items_by_vin[vin] = InventoryItem.model_validate(payload)
+        except Exception:
+            # If cache is corrupted or old, fall back to live computation.
+            continue
+
+    missing_vins: list[str] = []
+    seen_missing: set[str] = set()
+    for r in featured_rows:
+        vin = str(r.vin or "").strip().upper()
+        if not vin or vin in seen_missing or vin in cached_items_by_vin:
+            continue
+        seen_missing.add(vin)
+        missing_vins.append(vin)
+
+    base_by_vin = {}
+    if missing_vins:
+        # Batch fetch base inventory rows for only the missing VINs.
+        base_query = build_inventory_query(engine, {"vin_in": missing_vins})
+        base_rows = db.execute(base_query).fetchall()
+        base_by_vin = {str(r._mapping.get("vin") or "").strip().upper(): r._mapping for r in base_rows}
+
     for row in featured_rows:
         vin = str(row.vin or "").strip().upper()
         if not vin or vin in seen_vins:
             continue
-        try:
-            item = get_inventory_item(vin=vin, db=db)
-        except HTTPException:
+        cached_item = cached_items_by_vin.get(vin)
+        if cached_item:
+            items.append(cached_item)
+            seen_vins.add(vin)
+            if len(items) >= limit:
+                break
             continue
-        items.append(item)
+        mapping = base_by_vin.get(vin)
+        if not mapping:
+            # Fallback to existing per-vin loader if batch missed it.
+            try:
+                item = get_inventory_item(vin=vin, db=db)
+            except HTTPException:
+                continue
+            items.append(item)
+            seen_vins.add(vin)
+            if len(items) >= limit:
+                break
+            continue
+
+        # Reuse the same normalization logic as get_inventory_item for overrides/offers/scores.
+        manual_override = (
+            db.query(ManualVehicle)
+            .filter(ManualVehicle.vin == vin, ManualVehicle.is_active == True)
+            .first()
+        )
+        row_vehicle_type = (mapping.get("vehicle_type") or "").lower() or None
+        effective_vehicle_type = (
+            (manual_override.vehicle_type or "").strip().lower()
+            if manual_override and manual_override.vehicle_type
+            else row_vehicle_type
+        )
+        effective_year = manual_override.year if manual_override and manual_override.year is not None else mapping.get("year")
+        effective_make = manual_override.make if manual_override and manual_override.make else mapping.get("make")
+        effective_model = manual_override.model if manual_override and manual_override.model else mapping.get("model")
+        effective_trim = manual_override.trim if manual_override and manual_override.trim else mapping.get("trim")
+        effective_msrp = manual_override.msrp if manual_override and manual_override.msrp is not None else mapping.get("msrp")
+        effective_listed_price = (
+            manual_override.listed_price if manual_override and manual_override.listed_price is not None else mapping.get("listed_price")
+        )
+        effective_mileage = manual_override.mileage if manual_override and manual_override.mileage is not None else mapping.get("mileage")
+        effective_condition = (
+            (manual_override.condition or "").strip().lower()
+            if manual_override and manual_override.condition
+            else (str(mapping.get("condition")).lower() if mapping.get("condition") else None)
+        )
+        effective_details = manual_override.details_json if manual_override and manual_override.details_json else mapping.get("details")
+        effective_photos = manual_override.photos_json if manual_override and manual_override.photos_json else mapping.get("photos")
+        effective_dealer_name = manual_override.dealer_name if manual_override and manual_override.dealer_name else mapping.get("dealer_name")
+        effective_listing_url = manual_override.listing_url if manual_override and manual_override.listing_url else mapping.get("listing_url")
+        effective_carfax_url = manual_override.carfax_url if manual_override and manual_override.carfax_url else mapping.get("carfax_url")
+        dealer_email = _normalize_email(mapping.get("dealer_email"))
+        dealer_phone = manual_override.dealer_phone if manual_override and manual_override.dealer_phone else mapping.get("dealer_phone")
+        if not dealer_phone and dealer_email:
+            dealer_phone = _dealer_phone_by_email(db, {dealer_email}).get(dealer_email)
+        offer = db.query(OfferOverride).filter(OfferOverride.vin == vin).first()
+        if not offer:
+            key = _normalize_ymm_key(effective_year, effective_make, effective_model)
+            offer = _load_offer_ymm_map(db, {key} if key else set()).get(key) if key else None
+        offer_out = apply_offer_visibility(offer, effective_vehicle_type)
+
+        score = None
+        if effective_make and effective_model:
+            make_value = effective_make
+            model_value = effective_model
+            trim_value = effective_trim
+            year_value = effective_year
+            score = (
+                db.query(ModelScore)
+                .filter(
+                    ModelScore.make == make_value,
+                    ModelScore.model == model_value,
+                    ModelScore.trim == trim_value,
+                    ModelScore.year == year_value,
+                )
+                .first()
+            ) or (
+                db.query(ModelScore)
+                .filter(
+                    ModelScore.make == make_value,
+                    ModelScore.model == model_value,
+                    ModelScore.trim == trim_value,
+                    ModelScore.year.is_(None),
+                )
+                .first()
+            ) or (
+                db.query(ModelScore)
+                .filter(
+                    ModelScore.make == make_value,
+                    ModelScore.model == model_value,
+                    ModelScore.trim.is_(None),
+                    ModelScore.year == year_value,
+                )
+                .first()
+            ) or (
+                db.query(ModelScore)
+                .filter(
+                    ModelScore.make == make_value,
+                    ModelScore.model == model_value,
+                    ModelScore.trim.is_(None),
+                    ModelScore.year.is_(None),
+                )
+                .first()
+            )
+
+        items.append(
+            InventoryItem(
+                vin=vin,
+                vehicle_type=effective_vehicle_type,
+                year=effective_year,
+                make=effective_make,
+                model=effective_model,
+                trim=effective_trim,
+                msrp=float(effective_msrp) if effective_msrp is not None else None,
+                listed_price=float(effective_listed_price) if effective_listed_price is not None else None,
+                mileage=effective_mileage,
+                condition=effective_condition,
+                details=_serialize_details(effective_details),
+                photos=_manual_vehicle_photos(effective_photos) if manual_override and manual_override.photos_json else serialize_photos(effective_photos),
+                last_seen_at=str(mapping.get("last_seen_at")) if mapping.get("last_seen_at") else None,
+                dealer_name=effective_dealer_name,
+                dealer_phone=dealer_phone,
+                listing_url=effective_listing_url,
+                carfax_url=effective_carfax_url,
+                offer=OfferOverrideOut(**offer_out) if offer_out else None,
+                model_scores=ModelScoreOut(
+                    design=score.design,
+                    performance=score.performance,
+                    technology=score.technology,
+                    practicality=score.practicality,
+                    future_value=score.future_value,
+                )
+                if score
+                else None,
+            )
+        )
         seen_vins.add(vin)
         if len(items) >= limit:
             break
 
-    if len(items) < limit:
+    # If we already have some cached cards, avoid the heavy search fallback.
+    # This keeps the landing-page first load fast.
+    if len(items) < limit and len(cached_items_by_vin) == 0:
         fallback = search_inventory(
             vehicle_type="new",
             offers_only=True,

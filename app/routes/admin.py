@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import engine
 from app.core.deps import get_db, require_role
-from app.models.enums import OfferSource
+from app.models.enums import OfferSource, UserRole
 from app.models.homepage_featured_vehicle import HomepageFeaturedVehicle
 from app.models.lead_request import LeadRequest
 from app.models.manual_vehicle import ManualVehicle
@@ -24,11 +24,14 @@ from app.models.landing_page_content import LandingPageContent
 from app.models.sheet_sources_meta import SheetSourceMeta
 from app.models.testimonial import Testimonial
 from app.models.article import Article
+from app.models.user import User
+from app.schemas.user import UserOut
 from app.services.cloudinary import CloudinaryUploadError, cloudinary_is_configured, upload_image_to_cloudinary
 from app.services.offers import set_offer_visibility
 from app.services.lead_delivery import build_lead_webhook_payload, is_lead_webhook_enabled, send_lead_webhook
 from app.services.legacy_tables import build_inventory_query, load_legacy_tables
 from app.services.sheets_runner import run_sheets_sync_with_lock
+from app.routes.inventory import get_inventory_item
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 MAX_HOMEPAGE_FEATURED_VEHICLES = 6
@@ -595,11 +598,15 @@ def set_homepage_featured(
         .delete(synchronize_session=False)
     )
     for idx, vin in enumerate(ordered_vins, start=1):
+        # Precompute full landing-card payload so public homepage visits are fast.
+        item = get_inventory_item(vin=vin, db=db)
+        card_payload = item.model_dump() if hasattr(item, "model_dump") else item.dict()
         db.add(
             HomepageFeaturedVehicle(
                 month_key=month_key,
                 position=idx,
                 vin=vin,
+                card_payload_json=json.dumps(card_payload),
                 updated_by_user_id=getattr(user, "id", None),
             )
         )
@@ -968,6 +975,76 @@ def admin_upsert_landing_page(
     db.commit()
     db.refresh(row)
     return {"status": "updated", "content": current}
+
+
+@router.get("/users", response_model=list[UserOut])
+def admin_list_users(
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    rows = (
+        db.query(User)
+        .order_by(User.created_at.desc(), User.id.desc())
+        .limit(500)
+        .all()
+    )
+    return [UserOut.model_validate(row) for row in rows]
+
+
+class AdminUserUpdate(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    role: Optional[str] = None
+    is_email_verified: Optional[bool] = None
+    is_phone_verified: Optional[bool] = None
+
+
+@router.put("/users/{user_id}", response_model=UserOut)
+def admin_update_user(
+    user_id: int,
+    payload: AdminUserUpdate,
+    db: Session = Depends(get_db),
+    current=Depends(require_role("super_admin")),
+):
+    _ = current
+    row = db.query(User).filter(User.id == user_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if payload.name is not None:
+        cleaned = payload.name.strip()
+        if not cleaned:
+            raise HTTPException(status_code=400, detail="Name cannot be empty.")
+        row.name = cleaned
+    if payload.phone is not None:
+        row.phone = payload.phone.strip() or None
+
+    if payload.role is not None:
+        role_value = payload.role.strip()
+        if role_value not in {r.value for r in UserRole}:
+            raise HTTPException(status_code=400, detail="Invalid role.")
+        if row.role == UserRole.super_admin and role_value != UserRole.super_admin.value:
+            remaining = (
+                db.query(User)
+                .filter(User.role == UserRole.super_admin, User.id != row.id)
+                .count()
+            )
+            if remaining == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="At least one super_admin is required.",
+                )
+        row.role = UserRole(role_value)
+
+    if payload.is_email_verified is not None:
+        row.is_email_verified = bool(payload.is_email_verified)
+    if payload.is_phone_verified is not None:
+        row.is_phone_verified = bool(payload.is_phone_verified)
+
+    db.commit()
+    db.refresh(row)
+    return UserOut.model_validate(row)
 
 
 # ---------- Testimonials (super_admin) ----------

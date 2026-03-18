@@ -82,5 +82,8 @@ _engine_kw = dict(
 )
 if _select_mysql_driver() == "pymysql":
     _engine_kw["creator"] = _connect_with_retry
+
+# Note: create_engine does not actually connect to the database until first use,
+# so this will not block simple routes like `/health` that don't touch the DB.
 engine = create_engine(get_database_url(), **_engine_kw)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

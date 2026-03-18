@@ -254,6 +254,10 @@ def build_inventory_query(engine: Engine, filters: Dict[str, Any]):
         base = base.where(year_col == filters["year"])
     if "vin" in filters and filters["vin"]:
         base = base.where(vin_col == filters["vin"])
+    if "vin_in" in filters and filters["vin_in"]:
+        vin_list = [str(v).strip().upper() for v in filters["vin_in"] if str(v).strip()]
+        if vin_list:
+            base = base.where(vin_col.in_(vin_list))
 
     return base
 

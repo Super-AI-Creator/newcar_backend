@@ -7,7 +7,7 @@ from google.oauth2 import id_token as google_id_token
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.deps import get_db
+from app.core.deps import get_db, get_current_user
 from app.core.email import EmailDeliveryError, send_email
 from app.core.security import (
     create_access_token,
@@ -21,12 +21,15 @@ from app.models.auth_otp import AuthOtp
 from app.models.enums import OtpChannel, UserRole
 from app.models.credit_union import CreditUnion
 from app.models.user import User
+from app.schemas.user import UserOut
 from app.schemas.auth import (
     GoogleAuthRequest,
     LoginRequest,
     RegisterRequest,
     RegisterVerifyRequest,
     TokenResponse,
+    ProfileUpdateRequest,
+    PasswordChangeRequest,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -269,3 +272,27 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
 @router.post("/signin", response_model=TokenResponse, include_in_schema=False)
 def signin_alias(data: LoginRequest, db: Session = Depends(get_db)):
     return login(data, db)
+
+
+@router.patch("/me/profile", response_model=UserOut)
+def update_profile(payload: ProfileUpdateRequest, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    row = db.query(User).filter(User.id == user.id).first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    row.name = payload.name
+    row.phone = payload.phone
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@router.post("/me/change-password")
+def change_password(payload: PasswordChangeRequest, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    row = db.query(User).filter(User.id == user.id).first()
+    if not row or not row.password_hash:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password login not available for this account")
+    if not verify_password(payload.current_password, row.password_hash):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect")
+    row.password_hash = hash_password(payload.new_password)
+    db.commit()
+    return {"changed": True}

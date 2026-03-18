@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
+from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 
 from app.models.base import Base
 
@@ -14,6 +14,9 @@ class HomepageFeaturedVehicle(Base):
     month_key = Column(String(7), nullable=False, index=True)  # YYYY-MM
     position = Column(Integer, nullable=False)  # 1..6
     vin = Column(String(32), nullable=False)
+    # Precomputed landing-card payload for fast homepage rendering.
+    # Stored as JSON string to avoid DB-specific JSON column issues.
+    card_payload_json = Column(Text, nullable=True)
     updated_by_user_id = Column(BigInteger, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
