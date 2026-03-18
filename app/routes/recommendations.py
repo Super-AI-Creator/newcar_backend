@@ -26,8 +26,11 @@ def best_cars(
     practical: float = Query(0.0),
     value: float = Query(0.0),
     vehicle_type: str = Query("all", pattern="^(new|used|all)$"),
+    make: Optional[str] = Query(None),
+    model: Optional[str] = Query(None),
     max_price: Optional[float] = None,
     max_payment: Optional[float] = None,
+    sort_by: str = Query("best", pattern="^(best|price|payment)$"),
     limit: int = 10,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
@@ -40,7 +43,14 @@ def best_cars(
         "value": value,
     }
 
-    base_query = build_inventory_query(engine, {"vehicle_type": vehicle_type})
+    base_query = build_inventory_query(
+        engine,
+        {
+            "vehicle_type": vehicle_type,
+            "make": make,
+            "model": model,
+        },
+    )
     rows = db.execute(base_query).fetchall()
     if not rows:
         return RecommendationResponse(items=[])
@@ -59,7 +69,7 @@ def best_cars(
         key = (str(score.make).strip().lower(), str(score.model).strip().lower())
         scores_by_make_model[key].append(score)
 
-    items = []
+    scored_items: List[Tuple[RecommendationItem, Optional[float], Optional[float]]] = []
     for row in rows:
         score: Optional[ModelScore] = None
         if row.make and row.model:
@@ -81,12 +91,17 @@ def best_cars(
         photos = serialize_photos(getattr(row, "photos", None))
         photo = photos[0] if photos else None
         monthly: Optional[float] = None
+        need_monthly_for_sort_or_filter = max_payment is not None or sort_by == "payment"
 
         if max_price is not None and price is not None and price > max_price:
             continue
-        if max_payment is not None and price is not None:
-            monthly = override_monthly if row_vehicle_type == "new" and override_monthly is not None else estimate_monthly_payment(price, 5.0, 72, 0.0)
-            if monthly > max_payment:
+        if need_monthly_for_sort_or_filter and price is not None:
+            monthly = (
+                override_monthly
+                if row_vehicle_type == "new" and override_monthly is not None
+                else estimate_monthly_payment(price, 5.0, 72, 0.0)
+            )
+            if max_payment is not None and monthly > max_payment:
                 continue
 
         breakdown = compute_weighted_score(
@@ -103,7 +118,7 @@ def best_cars(
             vehicle_type=row_vehicle_type,
             preference_score=breakdown["total"],
             max_payment=max_payment,
-            estimated_monthly=monthly if max_payment is not None and price is not None else None,
+            estimated_monthly=monthly,
             msrp=msrp,
             effective_price=price,
             max_price=max_price,
@@ -112,33 +127,40 @@ def best_cars(
             last_seen_at=getattr(row, "last_seen_at", None),
         )
 
-        items.append(
-            RecommendationItem(
-                vin=row.vin,
-                vehicle_type=row_vehicle_type,
-                make=row.make,
-                model=row.model,
-                trim=row.trim,
-                photo=photo,
-                photos=photos,
-                score=ranking_breakdown["total"],
-                explanation=RecommendationExplanation(
-                    design=breakdown["design"],
-                    performance=breakdown["performance"],
-                    technology=breakdown["technology"],
-                    practicality=breakdown["practicality"],
-                    future_value=breakdown["future_value"],
-                    preference=ranking_breakdown.get("preference"),
-                    payment_fit=ranking_breakdown.get("payment_fit"),
-                    deal_score=ranking_breakdown.get("deal_score"),
-                    price_fit=ranking_breakdown.get("price_fit"),
-                    mileage_score=ranking_breakdown.get("mileage_score"),
-                    condition_score=ranking_breakdown.get("condition_score"),
-                    freshness=ranking_breakdown.get("freshness"),
-                    total=ranking_breakdown["total"],
-                ),
+        rec_item = RecommendationItem(
+            vin=row.vin,
+            vehicle_type=row_vehicle_type,
+            make=row.make,
+            model=row.model,
+            trim=row.trim,
+            photo=photo,
+            photos=photos,
+            score=ranking_breakdown["total"],
+            explanation=RecommendationExplanation(
+                design=breakdown["design"],
+                performance=breakdown["performance"],
+                technology=breakdown["technology"],
+                practicality=breakdown["practicality"],
+                future_value=breakdown["future_value"],
+                preference=ranking_breakdown.get("preference"),
+                payment_fit=ranking_breakdown.get("payment_fit"),
+                deal_score=ranking_breakdown.get("deal_score"),
+                price_fit=ranking_breakdown.get("price_fit"),
+                mileage_score=ranking_breakdown.get("mileage_score"),
+                condition_score=ranking_breakdown.get("condition_score"),
+                freshness=ranking_breakdown.get("freshness"),
+                total=ranking_breakdown["total"],
+            ),
             )
-        )
 
-    items.sort(key=lambda x: x.score, reverse=True)
-    return RecommendationResponse(items=items[:limit])
+        # Keep derived values for sorting without changing the response schema.
+        scored_items.append((rec_item, price, monthly))
+
+    if sort_by == "price":
+        scored_items.sort(key=lambda t: t[1] if t[1] is not None else float("inf"))
+    elif sort_by == "payment":
+        scored_items.sort(key=lambda t: t[2] if t[2] is not None else float("inf"))
+    else:
+        scored_items.sort(key=lambda t: t[0].score, reverse=True)
+
+    return RecommendationResponse(items=[t[0] for t in scored_items[:limit]])
