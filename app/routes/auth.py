@@ -86,7 +86,7 @@ def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
     return TokenResponse(access_token=access, refresh_token=refresh)
 
 
-@router.post("/register")
+@router.post("/register", response_model=TokenResponse)
 def register(data: RegisterRequest, db: Session = Depends(get_db)):
     existing = db.query(User).filter(User.email == data.email).first()
     if existing:
@@ -128,10 +128,9 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
 
-    return {
-        "registered": True,
-        "message": "Registration complete. You can now log in with email and password.",
-    }
+    access = create_access_token(user.email)
+    refresh = create_refresh_token(user.email)
+    return TokenResponse(access_token=access, refresh_token=refresh)
 
 
 @router.post("/register/request-otp")
@@ -212,9 +211,9 @@ def request_otp(data: RegisterRequest, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/register/verify-otp")
-@router.post("/verify-otp")
-@router.post("/otp/verify")
+@router.post("/register/verify-otp", response_model=TokenResponse)
+@router.post("/verify-otp", response_model=TokenResponse)
+@router.post("/otp/verify", response_model=TokenResponse)
 def verify_otp(data: RegisterVerifyRequest, db: Session = Depends(get_db)):
     channel = _to_channel(data.channel)
     user = db.query(User).filter(User.email == data.email).first()
@@ -251,7 +250,9 @@ def verify_otp(data: RegisterVerifyRequest, db: Session = Depends(get_db)):
             user.credit_union_id = cu.id
     db.commit()
 
-    return {"registered": True, "message": "Registration verified. You can now log in with email and password."}
+    access = create_access_token(user.email)
+    refresh = create_refresh_token(user.email)
+    return TokenResponse(access_token=access, refresh_token=refresh)
 
 
 @router.post("/login", response_model=TokenResponse)

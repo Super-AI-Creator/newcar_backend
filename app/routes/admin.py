@@ -888,6 +888,14 @@ class LandingFooterPayload(BaseModel):
     google_plus_url: Optional[str] = None
     instagram_url: Optional[str] = None
     youtube_url: Optional[str] = None
+    address_line: Optional[str] = None
+    phone_line: Optional[str] = None
+    footer_disclosure: Optional[str] = None
+    copyright_line: Optional[str] = None
+    link_lease_label: Optional[str] = None
+    link_lease_url: Optional[str] = None
+    link_broker_label: Optional[str] = None
+    link_broker_url: Optional[str] = None
 
 
 class LandingPagePayload(BaseModel):
@@ -926,6 +934,14 @@ def _landing_default() -> dict:
             "google_plus_url": "https://plus.google.com/101810114903929491113",
             "instagram_url": "https://www.instagram.com/newcarsuperstore/",
             "youtube_url": "https://www.youtube.com/channel/UCfnPH7n_x1cHc5WXDb0zMJQ",
+            "address_line": "2671 Ventura Blvd Suite Oxnard CA 93036",
+            "phone_line": "818.705.9200, 818.705.9202",
+            "footer_disclosure": "",
+            "copyright_line": "",
+            "link_lease_label": "Lease Specials Los Angeles",
+            "link_lease_url": "/lease-specials",
+            "link_broker_label": "Auto Broker Los Angeles",
+            "link_broker_url": "/most-reviewed-auto-broker-los-angeles",
         },
     }
 
@@ -988,16 +1004,33 @@ def admin_upsert_landing_page(
             for s in payload.how_it_works
         ]
     if payload.footer is not None:
+        ft = current.setdefault("footer", {})
         if payload.footer.facebook_url is not None:
-            current.setdefault("footer", {})["facebook_url"] = payload.footer.facebook_url
+            ft["facebook_url"] = payload.footer.facebook_url
         if payload.footer.twitter_url is not None:
-            current.setdefault("footer", {})["twitter_url"] = payload.footer.twitter_url
+            ft["twitter_url"] = payload.footer.twitter_url
         if payload.footer.google_plus_url is not None:
-            current.setdefault("footer", {})["google_plus_url"] = payload.footer.google_plus_url
+            ft["google_plus_url"] = payload.footer.google_plus_url
         if payload.footer.instagram_url is not None:
-            current.setdefault("footer", {})["instagram_url"] = payload.footer.instagram_url
+            ft["instagram_url"] = payload.footer.instagram_url
         if payload.footer.youtube_url is not None:
-            current.setdefault("footer", {})["youtube_url"] = payload.footer.youtube_url
+            ft["youtube_url"] = payload.footer.youtube_url
+        if payload.footer.address_line is not None:
+            ft["address_line"] = payload.footer.address_line
+        if payload.footer.phone_line is not None:
+            ft["phone_line"] = payload.footer.phone_line
+        if payload.footer.footer_disclosure is not None:
+            ft["footer_disclosure"] = payload.footer.footer_disclosure
+        if payload.footer.copyright_line is not None:
+            ft["copyright_line"] = payload.footer.copyright_line
+        if payload.footer.link_lease_label is not None:
+            ft["link_lease_label"] = payload.footer.link_lease_label
+        if payload.footer.link_lease_url is not None:
+            ft["link_lease_url"] = payload.footer.link_lease_url
+        if payload.footer.link_broker_label is not None:
+            ft["link_broker_label"] = payload.footer.link_broker_label
+        if payload.footer.link_broker_url is not None:
+            ft["link_broker_url"] = payload.footer.link_broker_url
     row.content = json.dumps(current)
     db.commit()
     db.refresh(row)

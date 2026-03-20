@@ -42,6 +42,14 @@ def _default_content() -> dict:
             "google_plus_url": "https://plus.google.com/101810114903929491113",
             "instagram_url": "https://www.instagram.com/newcarsuperstore/",
             "youtube_url": "https://www.youtube.com/channel/UCfnPH7n_x1cHc5WXDb0zMJQ",
+            "address_line": "2671 Ventura Blvd Suite Oxnard CA 93036",
+            "phone_line": "818.705.9200, 818.705.9202",
+            "footer_disclosure": "",
+            "copyright_line": "",
+            "link_lease_label": "Lease Specials Los Angeles",
+            "link_lease_url": "/lease-specials",
+            "link_broker_label": "Auto Broker Los Angeles",
+            "link_broker_url": "/most-reviewed-auto-broker-los-angeles",
         },
     }
 
