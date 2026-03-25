@@ -12,6 +12,8 @@ from app.models.lender_rate import LenderRate
 from app.models.offer_override import OfferOverride
 from app.models.user import User
 from app.schemas.misc import CreditApplicationIn, PublicCreditApplicationIn
+from app.services.credit_application_delivery import notify_credit_application_submitted
+from app.services.credit_application_format import enrich_payload_with_formatted
 from app.services.lender_logic import infer_credit_tier, select_best_rate
 from app.services.legacy_tables import load_legacy_tables
 from app.services.payments import estimate_monthly_payment, resolve_price
@@ -54,15 +56,25 @@ def _serialize_credit_application(
 
 @router.post("/apply")
 def apply_credit(payload: CreditApplicationIn, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    raw = payload.payload_json if isinstance(payload.payload_json, dict) else {}
+    merged = enrich_payload_with_formatted(raw, mask_sensitive=True)
     app_row = CreditApplication(
         user_id=user.id,
         vin=payload.vin,
-        payload_json=payload.payload_json,
+        payload_json=merged,
         source="authenticated",
         status="submitted",
     )
     db.add(app_row)
     db.commit()
+    db.refresh(app_row)
+    notify_credit_application_submitted(
+        application_id=int(app_row.id),
+        source="authenticated",
+        vin=app_row.vin,
+        payload_json=app_row.payload_json if isinstance(app_row.payload_json, dict) else merged,
+        created_at=app_row.created_at,
+    )
     return {"status": "received"}
 
 
@@ -71,15 +83,25 @@ def apply_credit_public(payload: PublicCreditApplicationIn, db: Session = Depend
     if not payload.agreed_to_terms:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You must agree to terms before submitting.")
 
+    base = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    merged = enrich_payload_with_formatted(base, mask_sensitive=True)
     app_row = CreditApplication(
         user_id=None,
         vin=payload.vin,
-        payload_json=payload.dict(),
+        payload_json=merged,
         source="public",
         status="submitted",
     )
     db.add(app_row)
     db.commit()
+    db.refresh(app_row)
+    notify_credit_application_submitted(
+        application_id=int(app_row.id),
+        source="public",
+        vin=app_row.vin,
+        payload_json=app_row.payload_json if isinstance(app_row.payload_json, dict) else merged,
+        created_at=app_row.created_at,
+    )
     return {"status": "received"}
 
 

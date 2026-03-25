@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_db
+from app.landing_footer_defaults import FOOTER_DISCLOSURE_DEFAULT
 from app.models.landing_page_content import LandingPageContent
 
 router = APIRouter(tags=["landing"])
@@ -44,7 +45,7 @@ def _default_content() -> dict:
             "youtube_url": "https://www.youtube.com/channel/UCfnPH7n_x1cHc5WXDb0zMJQ",
             "address_line": "2671 Ventura Blvd Suite Oxnard CA 93036",
             "phone_line": "818.705.9200, 818.705.9202",
-            "footer_disclosure": "",
+            "footer_disclosure": FOOTER_DISCLOSURE_DEFAULT,
             "copyright_line": "",
             "link_lease_label": "Lease Specials Los Angeles",
             "link_lease_url": "/lease-specials",
@@ -74,5 +75,11 @@ def get_landing_page(db: Session = Depends(get_db)):
         payload = data if isinstance(data, dict) else _default_content()
     except Exception:
         payload = _default_content()
+    foot = payload.get("footer")
+    if isinstance(foot, dict) and not (str(foot.get("footer_disclosure") or "").strip()):
+        payload = {
+            **payload,
+            "footer": {**foot, "footer_disclosure": FOOTER_DISCLOSURE_DEFAULT},
+        }
     _LANDING_CACHE[cache_key] = (now + _LANDING_CACHE_TTL_SECONDS, payload)
     return payload

@@ -10,6 +10,8 @@ from app.core.database import engine
 from app.core.deps import get_current_user, get_db, require_role
 from app.models.broker_message import BrokerMessage
 from app.models.credit_application import CreditApplication
+from app.services.credit_application_delivery import notify_credit_application_submitted
+from app.services.credit_application_format import enrich_payload_with_formatted
 from app.models.offer_override import OfferOverride
 from app.models.user import User
 from app.services.broker_messages import encode_message_for_storage, parse_message_from_storage
@@ -127,16 +129,26 @@ def credit_application_compat(
     user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    vin = (payload or {}).get("vin")
+    raw = payload if isinstance(payload, dict) else {}
+    vin = raw.get("vin")
+    merged = enrich_payload_with_formatted(raw, mask_sensitive=True)
     row = CreditApplication(
         user_id=user.id,
         vin=vin,
-        payload_json=payload or {},
+        payload_json=merged,
         source="compat",
         status="submitted",
     )
     db.add(row)
     db.commit()
+    db.refresh(row)
+    notify_credit_application_submitted(
+        application_id=int(row.id),
+        source="compat",
+        vin=row.vin,
+        payload_json=row.payload_json if isinstance(row.payload_json, dict) else merged,
+        created_at=row.created_at,
+    )
     return {"submitted": True}
 
 

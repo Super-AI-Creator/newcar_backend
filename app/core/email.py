@@ -26,6 +26,7 @@ def _send_via_resend(
     subject: str,
     body: str,
     attachments: Optional[Iterable[tuple]] = None,
+    html_body: Optional[str] = None,
 ) -> None:
     api_key = settings.resend_api_key
     if not api_key:
@@ -64,12 +65,17 @@ def send_email(
     subject: str,
     body: str,
     attachments: Optional[Iterable[tuple]] = None,
+    html_body: Optional[str] = None,
 ) -> None:
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = settings.smtp_from_email
     msg["To"] = to_email
-    msg.set_content(body)
+    if html_body:
+        msg.set_content(body)
+        msg.add_alternative(html_body, subtype="html")
+    else:
+        msg.set_content(body)
 
     if attachments:
         for filename, content, mime_type in attachments:
@@ -80,14 +86,28 @@ def send_email(
         provider = settings.email_provider.lower()
         if provider == "resend":
             if settings.resend_api_key:
-                _send_via_resend(to_email=to_email, subject=subject, body=body, attachments=attachments)
+                _send_via_resend(
+                    to_email=to_email,
+                    subject=subject,
+                    body=body,
+                    attachments=attachments,
+                    html_body=html_body,
+                )
             else:
-                _send_via_smtp(msg)
+                raise EmailDeliveryError(
+                    "EMAIL_PROVIDER=resend but RESEND_API_KEY is empty. Set RESEND_API_KEY or use EMAIL_PROVIDER=smtp."
+                )
         elif provider == "smtp":
             _send_via_smtp(msg)
         else:
             if settings.resend_api_key:
-                _send_via_resend(to_email=to_email, subject=subject, body=body, attachments=attachments)
+                _send_via_resend(
+                    to_email=to_email,
+                    subject=subject,
+                    body=body,
+                    attachments=attachments,
+                    html_body=html_body,
+                )
             else:
                 _send_via_smtp(msg)
     except (smtplib.SMTPException, OSError, httpx.HTTPError) as exc:

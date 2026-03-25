@@ -20,6 +20,7 @@ from app.models.manual_vehicle import ManualVehicle
 from app.models.offer_override import OfferOverride
 from app.models.model_score import ModelScore
 from app.models.seo_page_setting import SeoPageSetting
+from app.landing_footer_defaults import FOOTER_DISCLOSURE_DEFAULT
 from app.models.landing_page_content import LandingPageContent
 from app.models.sheet_sources_meta import SheetSourceMeta
 from app.models.testimonial import Testimonial
@@ -936,7 +937,7 @@ def _landing_default() -> dict:
             "youtube_url": "https://www.youtube.com/channel/UCfnPH7n_x1cHc5WXDb0zMJQ",
             "address_line": "2671 Ventura Blvd Suite Oxnard CA 93036",
             "phone_line": "818.705.9200, 818.705.9202",
-            "footer_disclosure": "",
+            "footer_disclosure": FOOTER_DISCLOSURE_DEFAULT,
             "copyright_line": "",
             "link_lease_label": "Lease Specials Los Angeles",
             "link_lease_url": "/lease-specials",
@@ -954,9 +955,16 @@ def admin_get_landing_page(db: Session = Depends(get_db), user=Depends(require_r
         return _landing_default()
     try:
         data = json.loads(row.content)
-        return data if isinstance(data, dict) else _landing_default()
+        payload = data if isinstance(data, dict) else _landing_default()
     except Exception:
-        return _landing_default()
+        payload = _landing_default()
+    foot = payload.get("footer")
+    if isinstance(foot, dict) and not (str(foot.get("footer_disclosure") or "").strip()):
+        payload = {
+            **payload,
+            "footer": {**foot, "footer_disclosure": FOOTER_DISCLOSURE_DEFAULT},
+        }
+    return payload
 
 
 @router.put("/landing-page")
