@@ -206,23 +206,13 @@ def notify_credit_application_submitted(
     """Fire-and-forget style calls from request handlers; failures are logged only.
 
     Client flow (when GHL token + location are configured):
-    - Contact exists in GHL → send Make webhook only (for note / automation on existing contact).
-    - Contact not in GHL → email CREDIT_APPLICATION_GHL_FALLBACK_EMAIL only; do **not** call webhook.
+    - Contact exists in GHL → Make webhook only (no broker SMTP email — GHL/Make is the notification).
+    - Contact not in GHL → email CREDIT_APPLICATION_GHL_FALLBACK_EMAIL if set, else broker credit email; no webhook.
 
     If GHL lookup is not configured or errors, we still send the webhook (legacy behavior) so Make is not dead.
     """
     applicant_email = payload_json.get("email")
     ghl_id, ghl_status = lookup_ghl_contact_by_email(applicant_email if isinstance(applicant_email, str) else None)
-
-    try:
-        send_credit_application_email(
-            application_id=application_id,
-            source=source,
-            vin=vin,
-            payload_json=payload_json,
-        )
-    except Exception:
-        logger.exception("Unexpected error sending credit application email id=%s", application_id)
 
     if ghl_status == "found":
         try:
@@ -240,7 +230,8 @@ def notify_credit_application_submitted(
         return
 
     if ghl_status == "not_found":
-        if (settings.credit_application_ghl_fallback_email or "").strip():
+        fallback_to = (settings.credit_application_ghl_fallback_email or "").strip()
+        if fallback_to:
             try:
                 send_credit_application_ghl_fallback_email(
                     application_id=application_id,
@@ -250,10 +241,29 @@ def notify_credit_application_submitted(
                 )
             except Exception:
                 logger.exception("Unexpected error sending credit GHL fallback email id=%s", application_id)
+        else:
+            try:
+                send_credit_application_email(
+                    application_id=application_id,
+                    source=source,
+                    vin=vin,
+                    payload_json=payload_json,
+                )
+            except Exception:
+                logger.exception("Unexpected error sending credit application email id=%s", application_id)
         # No webhook — new applicant is handled via email only.
         return
 
     # not_configured or error: cannot know if contact exists; keep webhook for backward compatibility.
+    try:
+        send_credit_application_email(
+            application_id=application_id,
+            source=source,
+            vin=vin,
+            payload_json=payload_json,
+        )
+    except Exception:
+        logger.exception("Unexpected error sending credit application email id=%s", application_id)
     try:
         send_credit_application_webhook(
             application_id=application_id,
