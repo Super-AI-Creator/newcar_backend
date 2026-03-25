@@ -1,4 +1,5 @@
 import base64
+import logging
 import smtplib
 from email.message import EmailMessage
 from typing import Iterable, Optional
@@ -6,6 +7,8 @@ from typing import Iterable, Optional
 import httpx
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class EmailDeliveryError(RuntimeError):
@@ -94,9 +97,11 @@ def send_email(
                     html_body=html_body,
                 )
             else:
-                raise EmailDeliveryError(
-                    "EMAIL_PROVIDER=resend but RESEND_API_KEY is empty. Set RESEND_API_KEY or use EMAIL_PROVIDER=smtp."
+                logger.warning(
+                    "EMAIL_PROVIDER=resend but RESEND_API_KEY is empty; sending via SMTP "
+                    "(SMTP_HOST / SMTP_USERNAME from .env)."
                 )
+                _send_via_smtp(msg)
         elif provider == "smtp":
             _send_via_smtp(msg)
         else:
