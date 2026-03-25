@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     credit_application_webhook_retry_backoff_seconds: float = Field(1.0)
     credit_application_email_enabled: bool = Field(True)
     credit_application_notify_email: Optional[str] = Field(None)
+    # GoHighLevel Lead Connector API (optional): used to detect existing contacts and email fallback when none.
+    ghl_private_integration_token: Optional[str] = Field(None)
+    ghl_location_id: Optional[str] = Field(None)
+    credit_application_ghl_fallback_email: Optional[str] = Field(None)
     cloudinary_cloud_name: Optional[str] = Field(None)
     cloudinary_api_key: Optional[str] = Field(None)
     cloudinary_api_secret: Optional[str] = Field(None)
