@@ -12,7 +12,7 @@ import httpx
 from app.core.config import settings
 from app.core.email import EmailDeliveryError, send_email
 from app.services.credit_application_format import format_credit_application_html, format_credit_application_plain
-from app.services.ghl_contacts import lookup_ghl_contact_by_email
+from app.services.ghl_contacts import lookup_ghl_contact_for_credit_payload
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +170,7 @@ def send_credit_application_ghl_fallback_email(
 
     plain = format_credit_application_plain(payload_json, mask_sensitive=True)
     header = (
-        f"No existing GoHighLevel contact matched this email before submit.\n"
+        f"No existing GoHighLevel contact matched applicant email or phone before submit.\n"
         f"Application ID: {application_id}\nSource: {source}\nApplicant email: {applicant_email or '—'}\n"
     )
     if vin:
@@ -180,7 +180,7 @@ def send_credit_application_ghl_fallback_email(
     html_inner = format_credit_application_html(payload_json, mask_sensitive=True)
     html_wrap = (
         f'<p style="font-family:system-ui,sans-serif;font-size:14px;color:#333;">'
-        f"<strong>No GHL contact match</strong> for applicant email.<br/>"
+        f"<strong>No GHL contact match</strong> for applicant email or phone.<br/>"
         f"<strong>Application ID:</strong> {application_id}<br/>"
         f"<strong>Source:</strong> {source}<br/>"
         f"<strong>Applicant email:</strong> {applicant_email or '—'}<br/>"
@@ -206,13 +206,13 @@ def notify_credit_application_submitted(
     """Fire-and-forget style calls from request handlers; failures are logged only.
 
     Client flow (when GHL token + location are configured):
-    - Contact exists in GHL → Make webhook only (no broker SMTP email — GHL/Make is the notification).
+    - Contact exists in GHL (email or phone match) → Make webhook only (no broker SMTP email — GHL/Make is the notification).
     - Contact not in GHL → email CREDIT_APPLICATION_GHL_FALLBACK_EMAIL if set, else broker credit email; no webhook.
 
     If GHL lookup is not configured or errors, we still send the webhook (legacy behavior) so Make is not dead.
     """
-    applicant_email = payload_json.get("email")
-    ghl_id, ghl_status = lookup_ghl_contact_by_email(applicant_email if isinstance(applicant_email, str) else None)
+    payload = payload_json if isinstance(payload_json, dict) else {}
+    ghl_id, ghl_status = lookup_ghl_contact_for_credit_payload(payload)
 
     if ghl_status == "found":
         try:
