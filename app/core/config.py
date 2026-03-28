@@ -53,11 +53,21 @@ class Settings(BaseSettings):
     credit_application_webhook_timeout_seconds: int = Field(15)
     credit_application_webhook_max_attempts: int = Field(3)
     credit_application_webhook_retry_backoff_seconds: float = Field(1.0)
+    # Deal Room: customer → broker chat → Make.com → GoHighLevel (optional webhook URL)
+    broker_message_webhook_url: Optional[str] = Field(None)
+    broker_message_webhook_secret: Optional[str] = Field(None)
+    broker_message_webhook_timeout_seconds: int = Field(15)
+    broker_message_webhook_max_attempts: int = Field(3)
+    broker_message_webhook_retry_backoff_seconds: float = Field(1.0)
     credit_application_email_enabled: bool = Field(True)
     credit_application_notify_email: Optional[str] = Field(None)
     # GoHighLevel Lead Connector API (optional): used to detect existing contacts and email fallback when none.
     ghl_private_integration_token: Optional[str] = Field(None)
+    # Optional second PIT with conversations/message.write only; inbound Deal Room messages use this if set.
+    ghl_conversations_private_integration_token: Optional[str] = Field(None)
     ghl_location_id: Optional[str] = Field(None)
+    # When true (default), customer Deal Room messages sync to GHL inbound conversation if contact exists (by email).
+    ghl_deal_room_conversation_enabled: bool = Field(True)
     credit_application_ghl_fallback_email: Optional[str] = Field(None)
     cloudinary_cloud_name: Optional[str] = Field(None)
     cloudinary_api_key: Optional[str] = Field(None)

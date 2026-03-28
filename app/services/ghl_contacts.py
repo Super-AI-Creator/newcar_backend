@@ -100,6 +100,7 @@ def _ghl_search(query: str) -> Tuple[List[Dict[str, Any]], Literal["ok", "error"
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
+                    "Accept": "application/json",
                     "Version": "2021-07-28",
                 },
                 json={
@@ -108,7 +109,22 @@ def _ghl_search(query: str) -> Tuple[List[Dict[str, Any]], Literal["ok", "error"
                     "query": q,
                 },
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                body = (response.text or "")[:300].replace("\n", " ")
+                logger.warning(
+                    "GHL contact search failed status=%s query=%s body=%s",
+                    response.status_code,
+                    q[:32],
+                    body or "(empty)",
+                )
+                if response.status_code == 401 and "not authorized for this scope" in (
+                    response.text or ""
+                ).lower():
+                    logger.warning(
+                        "GHL: enable contacts.readonly on the Private Integration for POST /contacts/search; "
+                        "contacts.write for POST /contacts/ (create). Use one token with every scope this app uses."
+                    )
+                return [], "error"
             data = response.json()
     except httpx.HTTPError as exc:
         logger.warning("GHL contact search HTTP error for query=%s: %s", q[:32], exc)
