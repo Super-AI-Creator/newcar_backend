@@ -21,7 +21,7 @@ def _default_content() -> dict:
             "headline": "Buy Any New Car in California Without the Dealership",
             "subtext": "SHOP, GET APPROVED AND GET THE CAR DELIVERED TO YOUR DOOR WITH A RED BOW.",
             "slide_urls": [
-                "/images/landing_img (1).jpg",
+                "/images/panel-cars.jpg",
                 "/images/landing_img (2).jpg",
                 "/images/landing_img (3).jpg",
                 "/images/landing_img (4).jpg",
@@ -35,7 +35,7 @@ def _default_content() -> dict:
         "how_it_works": [
             {"image_url": "/images/hero-cars.jpg", "label": "Browse Statewide Inventory", "image_focus": "center"},
             {"image_url": "/images/deal-1.jpg", "label": "Get Your Best Rate", "image_focus": "center"},
-            {"image_url": "/images/landing_img (1).jpg", "label": "Home Delivery With a Bow", "image_focus": "center"},
+            {"image_url": "/images/panel-cars.jpg", "label": "Home Delivery With a Bow", "image_focus": "center"},
         ],
         "footer": {
             "facebook_url": "https://www.facebook.com/newcarsuperstore/",
