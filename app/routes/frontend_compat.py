@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -15,6 +16,7 @@ from app.services.credit_application_format import enrich_payload_with_formatted
 from app.models.offer_override import OfferOverride
 from app.models.user import User
 from app.services.broker_messages import encode_message_for_storage, parse_message_from_storage
+from app.services.ghl_deal_room import sync_deal_room_customer_message_to_ghl
 from app.services.broker_message_webhook import (
     is_broker_message_webhook_enabled,
     run_broker_customer_message_webhook_task,
@@ -23,6 +25,7 @@ from app.services.broker_routing import select_next_broker_admin_user_id
 from app.services.legacy_tables import build_inventory_count_query, build_inventory_query, load_legacy_tables, serialize_photos
 
 router = APIRouter(tags=["frontend-compat"])
+logger = logging.getLogger(__name__)
 
 
 def _to_float(value: Any) -> Optional[float]:
@@ -126,6 +129,11 @@ def send_message_compat(
     db.add(msg)
     db.commit()
     db.refresh(msg)
+    try:
+        _, body = parse_message_from_storage(msg.message_text or "")
+        sync_deal_room_customer_message_to_ghl(user=user, message_text=body, vin=vin)
+    except Exception:
+        logger.exception("GHL deal room sync failed after save message_id=%s", msg.id)
     if is_broker_message_webhook_enabled():
         background_tasks.add_task(run_broker_customer_message_webhook_task, int(msg.id))
     return {"sent": True, "broker_admin_user_id": assigned_broker_user_id}

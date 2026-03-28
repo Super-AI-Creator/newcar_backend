@@ -15,7 +15,6 @@ from app.models.broker_message import BrokerMessage
 from app.models.user import User
 from app.services.broker_messages import parse_message_from_storage
 from app.services.ghl_contacts import lookup_ghl_contact_by_email
-from app.services.ghl_deal_room import sync_deal_room_customer_message_to_ghl
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +100,11 @@ def send_broker_customer_message_webhook(payload: Dict[str, Any]) -> None:
 
 
 def run_broker_customer_message_webhook_task(message_id: int) -> None:
-    """Load message + user in a fresh session (safe for FastAPI BackgroundTasks)."""
+    """
+    Deliver Make/Zapier webhook (background). GoHighLevel Deal Room sync runs inline in the
+    HTTP handler so it still runs when BROKER_MESSAGE_WEBHOOK_URL is unset and on serverless
+    hosts that terminate workers right after the response.
+    """
     db = SessionLocal()
     try:
         msg = db.query(BrokerMessage).filter(BrokerMessage.id == int(message_id)).first()
@@ -115,10 +118,6 @@ def run_broker_customer_message_webhook_task(message_id: int) -> None:
         if not user:
             logger.warning("Broker message webhook: no user for message_id=%s", message_id)
             return
-        try:
-            sync_deal_room_customer_message_to_ghl(user=user, message_text=body, vin=msg.vin)
-        except Exception:
-            logger.exception("GHL deal room sync failed message_id=%s", message_id)
         if is_broker_message_webhook_enabled():
             payload = build_broker_customer_message_payload(msg, user)
             send_broker_customer_message_webhook(payload)
