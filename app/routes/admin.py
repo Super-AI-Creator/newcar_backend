@@ -33,6 +33,7 @@ from app.services.lead_delivery import build_lead_webhook_payload, is_lead_webho
 from app.services.legacy_tables import build_inventory_query, load_legacy_tables
 from app.services.sheets_runner import run_sheets_sync_with_lock
 from app.routes.inventory import get_inventory_item
+from app.routes.landing import _default_hero_falling, invalidate_landing_page_cache
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 MAX_HOMEPAGE_FEATURED_VEHICLES = 6
@@ -864,12 +865,22 @@ def delete_seo_setting(
 
 
 # ---------- Landing page content (super_admin) ----------
+class LandingFallingPhrasesPayload(BaseModel):
+    enabled: Optional[bool] = None
+    phrases: Optional[list[str]] = None
+    duration_min: Optional[int] = None
+    duration_max: Optional[int] = None
+    max_phrases: Optional[int] = None
+    stagger: Optional[float] = None
+
+
 class LandingHeroPayload(BaseModel):
     kicker: Optional[str] = None
     headline: Optional[str] = None
     subtext: Optional[str] = None
     slide_urls: Optional[list[str]] = None
     slide_focus: Optional[list[str]] = None
+    falling: Optional[LandingFallingPhrasesPayload] = None
 
 
 class LandingLeasePayload(BaseModel):
@@ -919,6 +930,7 @@ def _landing_default() -> dict:
                 "/images/landing_img (4).jpg",
             ],
             "slide_focus": ["center", "center", "center", "center"],
+            "falling": _default_hero_falling(),
         },
         "lease": {
             "title": "Current Lease Specials Los Angeles",
@@ -964,6 +976,9 @@ def admin_get_landing_page(db: Session = Depends(get_db), user=Depends(require_r
             **payload,
             "footer": {**foot, "footer_disclosure": FOOTER_DISCLOSURE_DEFAULT},
         }
+    hero = payload.get("hero")
+    if isinstance(hero, dict) and not isinstance(hero.get("falling"), dict):
+        payload = {**payload, "hero": {**hero, "falling": _default_hero_falling()}}
     return payload
 
 
@@ -997,6 +1012,26 @@ def admin_upsert_landing_page(
             current.setdefault("hero", {})["slide_urls"] = payload.hero.slide_urls
         if payload.hero.slide_focus is not None:
             current.setdefault("hero", {})["slide_focus"] = payload.hero.slide_focus
+        if payload.hero.falling is not None:
+            hf = payload.hero.falling
+            hero = current.setdefault("hero", {})
+            prev = hero.get("falling") if isinstance(hero.get("falling"), dict) else _default_hero_falling()
+            nf = {**prev}
+            if hf.enabled is not None:
+                nf["enabled"] = bool(hf.enabled)
+            if hf.phrases is not None:
+                nf["phrases"] = [str(p).strip() for p in hf.phrases if str(p).strip()]
+            if hf.duration_min is not None:
+                nf["duration_min"] = max(8, min(90, int(hf.duration_min)))
+            if hf.duration_max is not None:
+                nf["duration_max"] = max(8, min(120, int(hf.duration_max)))
+            if nf.get("duration_min", 0) > nf.get("duration_max", 0):
+                nf["duration_min"], nf["duration_max"] = nf["duration_max"], nf["duration_min"]
+            if hf.max_phrases is not None:
+                nf["max_phrases"] = max(1, min(24, int(hf.max_phrases)))
+            if hf.stagger is not None:
+                nf["stagger"] = max(0.8, min(5.0, float(hf.stagger)))
+            hero["falling"] = nf
     if payload.lease is not None:
         if payload.lease.title is not None:
             current.setdefault("lease", {})["title"] = payload.lease.title
@@ -1042,6 +1077,7 @@ def admin_upsert_landing_page(
     row.content = json.dumps(current)
     db.commit()
     db.refresh(row)
+    invalidate_landing_page_cache()
     return {"status": "updated", "content": current}
 
 

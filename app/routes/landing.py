@@ -14,6 +14,30 @@ _LANDING_CACHE: dict[str, tuple[float, dict]] = {}
 _LANDING_CACHE_TTL_SECONDS = 60.0
 
 
+def invalidate_landing_page_cache() -> None:
+    _LANDING_CACHE.clear()
+
+
+def _default_hero_falling() -> dict:
+    return {
+        "enabled": True,
+        "phrases": [
+            "The #1 Dealer Site",
+            "It's Very Easy",
+            "Shop From Home",
+            "Delivered to Your Door",
+            "Licensed Auto Broker",
+            "Red Bow Delivery",
+            "Fast & Painless",
+            "Statewide Inventory",
+        ],
+        "duration_min": 19,
+        "duration_max": 26,
+        "max_phrases": 8,
+        "stagger": 2.4,
+    }
+
+
 def _default_content() -> dict:
     return {
         "hero": {
@@ -27,6 +51,7 @@ def _default_content() -> dict:
                 "/images/landing_img (4).jpg",
             ],
             "slide_focus": ["center", "center", "center", "center"],
+            "falling": _default_hero_falling(),
         },
         "lease": {
             "title": "Current Lease Specials Los Angeles",
@@ -81,5 +106,8 @@ def get_landing_page(db: Session = Depends(get_db)):
             **payload,
             "footer": {**foot, "footer_disclosure": FOOTER_DISCLOSURE_DEFAULT},
         }
+    hero = payload.get("hero")
+    if isinstance(hero, dict) and not isinstance(hero.get("falling"), dict):
+        payload = {**payload, "hero": {**hero, "falling": _default_hero_falling()}}
     _LANDING_CACHE[cache_key] = (now + _LANDING_CACHE_TTL_SECONDS, payload)
     return payload
