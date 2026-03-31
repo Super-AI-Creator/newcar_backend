@@ -24,6 +24,8 @@ _cors_origins = [
     "http://127.0.0.1:3000",
     "https://newcar-frontend.vercel.app",
     "http://newcar-frontend.vercel.app",
+    "https://newcar-superstore.com",
+    "http://newcar-superstore.com",
 ]
 _extra = os.getenv("CORS_ORIGINS", "").strip()
 if _extra:
