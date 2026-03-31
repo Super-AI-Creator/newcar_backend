@@ -5,7 +5,7 @@ import re
 import json
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import case, func, or_, select, true
 from sqlalchemy.orm import Session
@@ -13,7 +13,15 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import engine
 from app.core.deps import get_db, require_role
+from app.core.security import hash_password
+from app.models.auth_otp import AuthOtp
+from app.models.broker_message import BrokerMessage
+from app.models.credit_application import CreditApplication
+from app.models.deal import Deal
+from app.models.deal_event import DealEvent
+from app.models.document_submission import DocumentSubmission
 from app.models.enums import OfferSource, UserRole
+from app.models.favorite import Favorite
 from app.models.homepage_featured_vehicle import HomepageFeaturedVehicle
 from app.models.lead_request import LeadRequest
 from app.models.manual_vehicle import ManualVehicle
@@ -1104,6 +1112,10 @@ class AdminUserUpdate(BaseModel):
     is_phone_verified: Optional[bool] = None
 
 
+class AdminUserPasswordReset(BaseModel):
+    new_password: str
+
+
 @router.put("/users/{user_id}", response_model=UserOut)
 def admin_update_user(
     user_id: int,
@@ -1149,6 +1161,108 @@ def admin_update_user(
     db.commit()
     db.refresh(row)
     return UserOut.model_validate(row)
+
+
+@router.post("/users/{user_id}/reset-password")
+def admin_reset_user_password(
+    user_id: int,
+    payload: AdminUserPasswordReset,
+    db: Session = Depends(get_db),
+    current=Depends(require_role("super_admin")),
+):
+    _ = current
+    row = db.query(User).filter(User.id == user_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    new_password = (payload.new_password or "").strip()
+    if len(new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters.")
+
+    row.password_hash = hash_password(new_password)
+    db.commit()
+    return {"changed": True}
+
+
+@router.delete("/users/{user_id}")
+def admin_delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current=Depends(require_role("super_admin")),
+):
+    row = db.query(User).filter(User.id == user_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if current.id == row.id:
+        raise HTTPException(status_code=400, detail="You cannot delete your own account.")
+
+    if row.role == UserRole.super_admin:
+        remaining = (
+            db.query(User)
+            .filter(User.role == UserRole.super_admin, User.id != row.id)
+            .count()
+        )
+        if remaining == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="At least one super_admin is required.",
+            )
+
+    blockers: list[str] = []
+    blocker_checks = [
+        ("deals", db.query(func.count(Deal.id)).filter(Deal.user_id == row.id).scalar() or 0),
+        ("broker messages", db.query(func.count(BrokerMessage.id)).filter(BrokerMessage.user_id == row.id).scalar() or 0),
+        ("document submissions", db.query(func.count(DocumentSubmission.id)).filter(DocumentSubmission.user_id == row.id).scalar() or 0),
+        ("favorites", db.query(func.count(Favorite.id)).filter(Favorite.user_id == row.id).scalar() or 0),
+    ]
+    for label, count in blocker_checks:
+        if count:
+            blockers.append(f"{label} ({int(count)})")
+
+    if blockers:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete user with linked records: " + ", ".join(blockers) + ".",
+        )
+
+    db.query(AuthOtp).filter(AuthOtp.user_id == row.id).delete(synchronize_session=False)
+    db.query(LeadRequest).filter(LeadRequest.user_id == row.id).update(
+        {LeadRequest.user_id: None},
+        synchronize_session=False,
+    )
+    db.query(CreditApplication).filter(CreditApplication.user_id == row.id).update(
+        {CreditApplication.user_id: None},
+        synchronize_session=False,
+    )
+    db.query(CreditApplication).filter(CreditApplication.reviewed_by_user_id == row.id).update(
+        {CreditApplication.reviewed_by_user_id: None},
+        synchronize_session=False,
+    )
+    db.query(Deal).filter(Deal.assigned_broker_user_id == row.id).update(
+        {Deal.assigned_broker_user_id: None},
+        synchronize_session=False,
+    )
+    db.query(DealEvent).filter(DealEvent.actor_user_id == row.id).update(
+        {DealEvent.actor_user_id: None},
+        synchronize_session=False,
+    )
+    db.query(BrokerMessage).filter(BrokerMessage.broker_admin_user_id == row.id).update(
+        {BrokerMessage.broker_admin_user_id: None},
+        synchronize_session=False,
+    )
+    db.query(HomepageFeaturedVehicle).filter(HomepageFeaturedVehicle.updated_by_user_id == row.id).update(
+        {HomepageFeaturedVehicle.updated_by_user_id: None},
+        synchronize_session=False,
+    )
+    db.query(OfferOverride).filter(OfferOverride.updated_by_user_id == row.id).update(
+        {OfferOverride.updated_by_user_id: None},
+        synchronize_session=False,
+    )
+
+    db.delete(row)
+    db.commit()
+    return {"deleted": True}
 
 
 # ---------- Testimonials (super_admin) ----------
