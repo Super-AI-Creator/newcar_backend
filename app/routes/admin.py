@@ -48,6 +48,7 @@ MAX_HOMEPAGE_FEATURED_VEHICLES = 6
 _MONTH_KEY_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _SEO_PAGE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 MAX_MANUAL_PHOTO_BYTES = 8 * 1024 * 1024
+DEFAULT_HOMEPAGE_FEATURED_KEY = "default"
 _MANUAL_PHOTO_MIME_SUFFIX = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -207,13 +208,24 @@ def _normalize_vin(vin: str) -> str:
     return normalized
 
 
-def _resolve_month_key(month: Optional[str]) -> str:
-    candidate = (month or "").strip()
-    if not candidate:
-        return datetime.now(timezone.utc).strftime("%Y-%m")
-    if not _MONTH_KEY_RE.match(candidate):
-        raise HTTPException(status_code=400, detail="month must be in YYYY-MM format.")
-    return candidate
+def _homepage_featured_key_for_read(db: Session) -> str:
+    default_exists = (
+        db.query(HomepageFeaturedVehicle.id)
+        .filter(HomepageFeaturedVehicle.month_key == DEFAULT_HOMEPAGE_FEATURED_KEY)
+        .first()
+        is not None
+    )
+    if default_exists:
+        return DEFAULT_HOMEPAGE_FEATURED_KEY
+
+    latest = (
+        db.query(HomepageFeaturedVehicle.month_key)
+        .order_by(HomepageFeaturedVehicle.updated_at.desc(), HomepageFeaturedVehicle.id.desc())
+        .first()
+    )
+    if latest and latest[0]:
+        return str(latest[0])
+    return DEFAULT_HOMEPAGE_FEATURED_KEY
 
 
 def _normalize_seo_page_key(page_key: str) -> str:
@@ -563,23 +575,20 @@ def _serialize_manual_vehicle(row: ManualVehicle, offer: Optional[OfferOverride]
 
 @router.get("/homepage-featured")
 def get_homepage_featured(
-    month: Optional[str] = Query(None, description="Month key in YYYY-MM. Defaults to current UTC month."),
     db: Session = Depends(get_db),
     user=Depends(require_role("super_admin")),
 ):
     _ = user
-    month_key = _resolve_month_key(month)
-    return _serialize_homepage_featured(db, month_key)
+    return _serialize_homepage_featured(db, _homepage_featured_key_for_read(db))
 
 
 @router.put("/homepage-featured")
 def set_homepage_featured(
     payload: HomepageFeaturedUpdate,
-    month: Optional[str] = Query(None, description="Month key in YYYY-MM. Defaults to current UTC month."),
     db: Session = Depends(get_db),
     user=Depends(require_role("super_admin")),
 ):
-    month_key = _resolve_month_key(month)
+    month_key = DEFAULT_HOMEPAGE_FEATURED_KEY
     ordered_vins: list[str] = []
     seen: set[str] = set()
     for vin in payload.vins:
@@ -622,6 +631,11 @@ def set_homepage_featured(
         )
 
     db.commit()
+    try:
+        from app.routes.inventory import _HOMEPAGE_SPECIALS_CACHE
+        _HOMEPAGE_SPECIALS_CACHE.clear()
+    except Exception:
+        pass
     return _serialize_homepage_featured(db, month_key)
 
 

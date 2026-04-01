@@ -282,6 +282,29 @@ def _resolve_month_key(month: Optional[str]) -> str:
     return candidate
 
 
+DEFAULT_HOMEPAGE_FEATURED_KEY = "default"
+
+
+def _homepage_featured_key_for_read(db: Session) -> str:
+    default_exists = (
+        db.query(HomepageFeaturedVehicle.id)
+        .filter(HomepageFeaturedVehicle.month_key == DEFAULT_HOMEPAGE_FEATURED_KEY)
+        .first()
+        is not None
+    )
+    if default_exists:
+        return DEFAULT_HOMEPAGE_FEATURED_KEY
+
+    latest = (
+        db.query(HomepageFeaturedVehicle.month_key)
+        .order_by(HomepageFeaturedVehicle.updated_at.desc(), HomepageFeaturedVehicle.id.desc())
+        .first()
+    )
+    if latest and latest[0]:
+        return str(latest[0])
+    return DEFAULT_HOMEPAGE_FEATURED_KEY
+
+
 def _manual_vehicle_photos(raw: Optional[str]) -> list[str]:
     if not raw:
         return []
@@ -697,10 +720,9 @@ def search_inventory(
 @router.get("/homepage-specials", response_model=InventorySearchResponse, response_model_exclude_none=True)
 def homepage_specials(
     limit: int = Query(_MAX_HOMEPAGE_FEATURED_VEHICLES, ge=1, le=_MAX_HOMEPAGE_FEATURED_VEHICLES),
-    month: Optional[str] = Query(None, description="Month key in YYYY-MM. Defaults to current UTC month."),
     db: Session = Depends(get_db),
 ):
-    month_key = _resolve_month_key(month)
+    month_key = _homepage_featured_key_for_read(db)
     cache_key = f"limit={limit}|month={month_key}"
     now = time.time()
     cached = _HOMEPAGE_SPECIALS_CACHE.get(cache_key)
