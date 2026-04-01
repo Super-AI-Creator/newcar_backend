@@ -31,6 +31,7 @@ class InventoryItem(BaseModel):
     model: Optional[str]
     trim: Optional[str]
     msrp: Optional[float]
+    estimated_monthly: Optional[float] = None
     listed_price: Optional[float] = None
     mileage: Optional[int] = None
     condition: Optional[str] = None

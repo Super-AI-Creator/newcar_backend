@@ -21,6 +21,7 @@ from app.schemas.inventory import InventoryItem, InventorySearchResponse, OfferO
 from app.services.legacy_tables import build_inventory_count_query, build_inventory_query, serialize_photos
 from app.services.make_normalization import canonicalize_make
 from app.services.offers import apply_offer_visibility
+from app.services.payments import estimate_monthly_payment, resolve_price
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 _SEARCH_CACHE: dict[str, tuple[float, dict]] = {}
@@ -467,6 +468,9 @@ def search_inventory(
     vehicle_type: str = Query("all", pattern="^(new|used|all)$"),
     max_price: Optional[float] = None,
     max_payment: Optional[float] = None,
+    down_payment: float = Query(0.0),
+    apr: float = Query(6.99),
+    term_months: int = Query(72),
     max_mileage: Optional[int] = None,
     condition: str = Query("all", pattern="^(used|cpo|all)$"),
     offers_only: bool = Query(False),
@@ -483,6 +487,9 @@ def search_inventory(
         vehicle_type=vehicle_type,
         max_price=max_price,
         max_payment=max_payment,
+        down_payment=down_payment,
+        apr=apr,
+        term_months=term_months,
         max_mileage=max_mileage,
         condition=condition,
         offers_only=offers_only,
@@ -561,6 +568,22 @@ def search_inventory(
     exact_score_map, trim_fallback_score_map, year_fallback_score_map, full_fallback_score_map = _load_score_maps(db, rows)
 
     items = []
+
+    def _estimated_monthly_for_values(
+        *,
+        vehicle_type_value,
+        msrp_value,
+        discounted_value,
+        listed_price_value,
+    ) -> Optional[float]:
+        if str(vehicle_type_value or "").lower() != "new":
+            return None
+        price = resolve_price(vehicle_type_value, msrp_value, discounted_value, listed_price_value)
+        if price is None:
+            return None
+        taxed_price = float(price) * 1.10
+        return round(estimate_monthly_payment(taxed_price, float(apr), int(term_months), float(down_payment)), 2)
+
     for row in rows:
         mapping = row._mapping
         vin = mapping.get("vin")
@@ -578,6 +601,12 @@ def search_inventory(
         offer_out = apply_offer_visibility(offer, row_vehicle_type)
         if offers_only and not offer_out:
             continue
+        estimated_monthly = _estimated_monthly_for_values(
+            vehicle_type_value=row_vehicle_type,
+            msrp_value=float(mapping.get("msrp")) if mapping.get("msrp") is not None else None,
+            discounted_value=float(offer.discounted_price) if offer and offer.discounted_price is not None else None,
+            listed_price_value=float(mapping.get("listed_price")) if mapping.get("listed_price") is not None else None,
+        )
         score = None
         make_value = mapping.get("make")
         model_value = mapping.get("model")
@@ -600,6 +629,7 @@ def search_inventory(
                 model=mapping.get("model"),
                 trim=mapping.get("trim"),
                 msrp=float(mapping.get("msrp")) if mapping.get("msrp") is not None else None,
+                estimated_monthly=estimated_monthly,
                 listed_price=float(mapping.get("listed_price")) if mapping.get("listed_price") is not None else None,
                 mileage=mapping.get("mileage"),
                 condition=str(mapping.get("condition")).lower() if mapping.get("condition") else None,
@@ -654,6 +684,12 @@ def search_inventory(
         offer_out = apply_offer_visibility(offer, (row.vehicle_type or "new").strip().lower())
         if offers_only and not offer_out:
             continue
+        estimated_monthly = _estimated_monthly_for_values(
+            vehicle_type_value=(row.vehicle_type or "new").strip().lower(),
+            msrp_value=float(row.msrp) if row.msrp is not None else None,
+            discounted_value=float(offer.discounted_price) if offer and offer.discounted_price is not None else None,
+            listed_price_value=float(row.listed_price) if row.listed_price is not None else None,
+        )
         manual_match_count += 1
         if (max_payment is None or max_payment <= 0) and page != 1 and not offers_only:
             continue
@@ -666,6 +702,7 @@ def search_inventory(
                 model=row.model,
                 trim=row.trim,
                 msrp=float(row.msrp) if row.msrp is not None else None,
+                estimated_monthly=estimated_monthly,
                 listed_price=float(row.listed_price) if row.listed_price is not None else None,
                 mileage=row.mileage,
                 condition=(row.condition or "").strip().lower() or None,
@@ -685,7 +722,7 @@ def search_inventory(
         def _monthly_ok(item: InventoryItem) -> bool:
             if (item.vehicle_type or "").lower() != "new":
                 return True
-            monthly = item.offer and getattr(item.offer, "monthly_payment", None)
+            monthly = item.estimated_monthly
             if monthly is None:
                 return True
             return float(monthly) <= max_payment
