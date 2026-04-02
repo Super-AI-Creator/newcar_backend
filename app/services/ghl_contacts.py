@@ -1,4 +1,4 @@
-"""Optional GoHighLevel (Lead Connector) contact lookup by email and/or phone."""
+"""Optional GoHighLevel (Lead Connector) contact lookup and contact creation."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 GHL_SEARCH_URL = "https://services.leadconnectorhq.com/contacts/search"
+GHL_CREATE_URL = "https://services.leadconnectorhq.com/contacts/"
 LookupStatus = Literal["found", "not_found", "not_configured", "error"]
 
 
@@ -208,3 +209,87 @@ def lookup_ghl_contact_by_email(applicant_email: Optional[str]) -> Tuple[Optiona
     if applicant_email:
         payload["email"] = applicant_email
     return lookup_ghl_contact_for_credit_payload(payload)
+
+
+def _split_name(value: Optional[str]) -> Tuple[str, str]:
+    parts = [part for part in (value or "").strip().split() if part]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
+
+
+def create_ghl_contact_for_lead(payload: Dict[str, Any]) -> Tuple[Optional[str], LookupStatus]:
+    token = (settings.ghl_private_integration_token or "").strip()
+    location_id = (settings.ghl_location_id or "").strip()
+    if not token or not location_id:
+        return None, "not_configured"
+
+    email_n = _normalize_email(payload.get("email") if isinstance(payload.get("email"), str) else None)
+    phone = (payload.get("phone") if isinstance(payload.get("phone"), str) else "") or ""
+    if not email_n and not _normalize_phone_digits(phone):
+        return None, "not_found"
+
+    existing_id, existing_status = lookup_ghl_contact_for_credit_payload(payload)
+    if existing_status == "found" and existing_id:
+        return existing_id, "found"
+    if existing_status in {"error", "not_configured"}:
+        return existing_id, existing_status
+
+    first_name, last_name = _split_name(payload.get("name") if isinstance(payload.get("name"), str) else None)
+    source = (payload.get("source") if isinstance(payload.get("source"), str) else "") or "website_lead"
+    note_parts = [
+        f"Lead source: {source}",
+        f"Vehicle: {payload.get('vehicle')}" if payload.get("vehicle") else None,
+        f"VIN: {payload.get('vin')}" if payload.get("vin") else None,
+        f"Notes: {payload.get('notes')}" if payload.get("notes") else None,
+    ]
+
+    body: Dict[str, Any] = {
+        "locationId": location_id,
+        "firstName": first_name or "Website",
+        "lastName": last_name or "Lead",
+        "name": ((first_name + " " + last_name).strip() or payload.get("name") or "Website Lead"),
+        "email": email_n or None,
+        "phone": phone.strip() or None,
+        "source": source,
+        "tags": ["Website Lead", "Quote Request", source],
+        "notes": " | ".join(part for part in note_parts if part),
+    }
+    body = {k: v for k, v in body.items() if v not in (None, "", [])}
+
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            response = client.post(
+                GHL_CREATE_URL,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "Version": "2021-07-28",
+                },
+                json=body,
+            )
+            if response.status_code >= 400:
+                body_preview = (response.text or "")[:400].replace("\n", " ")
+                logger.warning(
+                    "GHL contact create failed status=%s email=%s phone=%s body=%s",
+                    response.status_code,
+                    email_n[:48],
+                    phone[:24],
+                    body_preview or "(empty)",
+                )
+                return None, "error"
+            data = response.json() if response.content else {}
+    except httpx.HTTPError as exc:
+        logger.warning("GHL contact create HTTP error email=%s: %s", email_n[:48], exc)
+        return None, "error"
+    except Exception:
+        logger.exception("GHL contact create failed email=%s", email_n[:48])
+        return None, "error"
+
+    contact_id = data.get("contact", {}).get("id") if isinstance(data.get("contact"), dict) else data.get("id")
+    if contact_id is None:
+        contact_id = data.get("contactId")
+    return (str(contact_id), "found") if contact_id is not None else (None, "error")

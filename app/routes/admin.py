@@ -73,17 +73,17 @@ def sources(db: Session = Depends(get_db), user=Depends(require_role("broker_adm
 
 
 @router.post("/sync-sheets")
-def sync_sheets(db: Session = Depends(get_db), user=Depends(require_role("broker_admin"))):
+def sync_sheets(db: Session = Depends(get_db), user=Depends(require_role("broker_admin", "super_admin"))):
     return _sync_sheets(db)
 
 
 @router.post("/sync")
-def sync_sheets_alias(db: Session = Depends(get_db), user=Depends(require_role("broker_admin"))):
+def sync_sheets_alias(db: Session = Depends(get_db), user=Depends(require_role("broker_admin", "super_admin"))):
     return _sync_sheets(db)
 
 
 @router.get("/sync-status")
-def sync_status(db: Session = Depends(get_db), user=Depends(require_role("broker_admin"))):
+def sync_status(db: Session = Depends(get_db), user=Depends(require_role("broker_admin", "super_admin"))):
     rows = (
         db.query(SheetSourceMeta)
         .filter(SheetSourceMeta.sheet_name.in_(["offers", "scores"]))

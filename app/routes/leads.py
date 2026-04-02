@@ -9,6 +9,7 @@ from app.core.security import decode_token
 from app.models.lead_request import LeadRequest
 from app.models.user import User
 from app.schemas.leads import LeadCreateIn, LeadCreateOut
+from app.services.ghl_contacts import create_ghl_contact_for_lead
 from app.services.lead_delivery import build_lead_webhook_payload, is_lead_webhook_enabled, send_lead_webhook
 
 router = APIRouter(prefix="/leads", tags=["leads"])
@@ -69,6 +70,7 @@ def create_lead(
     db.add(row)
     db.commit()
     db.refresh(row)
+    background_tasks.add_task(create_ghl_contact_for_lead, build_lead_webhook_payload(row))
     if is_lead_webhook_enabled():
         background_tasks.add_task(send_lead_webhook, build_lead_webhook_payload(row))
 
