@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.deps import get_db
 from app.landing_footer_defaults import FOOTER_DISCLOSURE_DEFAULT
+from app.landing_slide_urls import normalize_hero_slide_urls_in_payload
 from app.models.landing_page_content import LandingPageContent
 
 router = APIRouter(tags=["landing"])
@@ -45,10 +46,10 @@ def _default_content() -> dict:
             "headline": "Buy Any New Car in California Without the Dealership",
             "subtext": "SHOP, GET APPROVED AND GET THE CAR DELIVERED TO YOUR DOOR WITH A RED BOW.",
             "slide_urls": [
-                "/images/panel-cars.jpg",
-                "/images/landing_img (2).jpg",
-                "/images/landing_img (3).jpg",
-                "/images/landing_img (4).jpg",
+                "/images/landing-1.jpg",
+                "/images/landing-2.jpg",
+                "/images/landing-3.jpg",
+                "/images/landing-4.jpg",
             ],
             "slide_focus": ["center", "center", "center", "center"],
             "falling": _default_hero_falling(),
@@ -92,7 +93,7 @@ def get_landing_page(db: Session = Depends(get_db)):
 
     row = db.query(LandingPageContent).filter(LandingPageContent.id == 1).first()
     if not row or not row.content or not row.content.strip():
-        payload = _default_content()
+        payload = normalize_hero_slide_urls_in_payload(_default_content())
         _LANDING_CACHE[cache_key] = (now + _LANDING_CACHE_TTL_SECONDS, payload)
         return payload
     try:
@@ -109,5 +110,6 @@ def get_landing_page(db: Session = Depends(get_db)):
     hero = payload.get("hero")
     if isinstance(hero, dict) and not isinstance(hero.get("falling"), dict):
         payload = {**payload, "hero": {**hero, "falling": _default_hero_falling()}}
+    payload = normalize_hero_slide_urls_in_payload(payload)
     _LANDING_CACHE[cache_key] = (now + _LANDING_CACHE_TTL_SECONDS, payload)
     return payload

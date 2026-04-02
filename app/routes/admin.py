@@ -29,6 +29,7 @@ from app.models.offer_override import OfferOverride
 from app.models.model_score import ModelScore
 from app.models.seo_page_setting import SeoPageSetting
 from app.landing_footer_defaults import FOOTER_DISCLOSURE_DEFAULT
+from app.landing_slide_urls import normalize_hero_slide_urls_in_payload
 from app.models.landing_page_content import LandingPageContent
 from app.models.sheet_sources_meta import SheetSourceMeta
 from app.models.testimonial import Testimonial
@@ -946,10 +947,10 @@ def _landing_default() -> dict:
             "headline": "Buy Any New Car in California Without the Dealership",
             "subtext": "SHOP, GET APPROVED AND GET THE CAR DELIVERED TO YOUR DOOR WITH A RED BOW.",
             "slide_urls": [
-                "/images/panel-cars.jpg",
-                "/images/landing_img (2).jpg",
-                "/images/landing_img (3).jpg",
-                "/images/landing_img (4).jpg",
+                "/images/landing-1.jpg",
+                "/images/landing-2.jpg",
+                "/images/landing-3.jpg",
+                "/images/landing-4.jpg",
             ],
             "slide_focus": ["center", "center", "center", "center"],
             "falling": _default_hero_falling(),
@@ -986,7 +987,7 @@ def admin_get_landing_page(db: Session = Depends(get_db), user=Depends(require_r
     _ = user
     row = db.query(LandingPageContent).filter(LandingPageContent.id == 1).first()
     if not row or not row.content or not row.content.strip():
-        return _landing_default()
+        return normalize_hero_slide_urls_in_payload(_landing_default())
     try:
         data = json.loads(row.content)
         payload = data if isinstance(data, dict) else _landing_default()
@@ -1001,7 +1002,7 @@ def admin_get_landing_page(db: Session = Depends(get_db), user=Depends(require_r
     hero = payload.get("hero")
     if isinstance(hero, dict) and not isinstance(hero.get("falling"), dict):
         payload = {**payload, "hero": {**hero, "falling": _default_hero_falling()}}
-    return payload
+    return normalize_hero_slide_urls_in_payload(payload)
 
 
 @router.put("/landing-page")
