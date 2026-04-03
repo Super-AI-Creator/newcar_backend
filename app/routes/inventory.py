@@ -139,6 +139,18 @@ def _load_offer_ymm_map(db: Session, keys: set[tuple[int, str, str]]):
     return matched_keys
 
 
+def _vins_with_lease_monthly_in_db(db: Session) -> list[str]:
+    """VINs that have a non-null monthly_payment on offer_overrides (lease-specials driver)."""
+    return [
+        str(r[0]).strip().upper()
+        for r in db.query(OfferOverride.vin)
+        .filter(OfferOverride.monthly_payment.isnot(None))
+        .distinct()
+        .all()
+        if r[0]
+    ]
+
+
 def _resolve_offer_for_vehicle(
     *,
     vin: Optional[str],
@@ -399,7 +411,11 @@ def inventory_filters(
                 offer_map=offer_map,
                 ymm_offer_map=ymm_offer_map,
             )
-            offer_out = apply_offer_visibility(offer, (mapping.get("vehicle_type") or "").strip().lower())
+            offer_out = apply_offer_visibility(
+                offer,
+                (mapping.get("vehicle_type") or "").strip().lower(),
+                require_monthly_payment=offers_only,
+            )
             if not offer_out:
                 continue
         make_key = canonicalize_make(str(make_value)) if make_value is not None else None
@@ -426,7 +442,7 @@ def inventory_filters(
                 offer_map=offer_map,
                 ymm_offer_map=ymm_offer_map,
             )
-            if not apply_offer_visibility(offer, row_vehicle_type):
+            if not apply_offer_visibility(offer, row_vehicle_type, require_monthly_payment=True):
                 continue
         make_value = (row.make or "").strip()
         model_value = (row.model or "").strip()
@@ -511,6 +527,11 @@ def search_inventory(
         "max_mileage": max_mileage,
         "condition": condition,
     }
+    lease_special_vins: list[str] = []
+    if offers_only:
+        lease_special_vins = _vins_with_lease_monthly_in_db(db)
+        if lease_special_vins:
+            filters = {**filters, "vin_in": lease_special_vins}
     base_query = build_inventory_query(engine, filters)
     if offers_only:
         fetch_size = None
@@ -538,9 +559,9 @@ def search_inventory(
         total = None
 
     if offers_only:
-        # offers_only is typically used for "featured specials" style lists.
-        # Always apply LIMIT/OFFSET; otherwise we accidentally fetch the entire inventory.
-        rows = db.execute(base_query.limit(page_size).offset(offset)).fetchall()
+        # Restrict to VINs that have a lease monthly in DB, then load all matching rows (bounded by
+        # offer count — not the first page_size rows of full inventory, which hid most specials).
+        rows = db.execute(base_query).fetchall() if lease_special_vins else []
     else:
         rows = db.execute(base_query.limit(fetch_size).offset(offset)).fetchall()
     vins = [r._mapping.get("vin") for r in rows if r._mapping.get("vin")]
@@ -598,7 +619,7 @@ def search_inventory(
             offer_map=offer_map,
             ymm_offer_map=ymm_offer_map,
         )
-        offer_out = apply_offer_visibility(offer, row_vehicle_type)
+        offer_out = apply_offer_visibility(offer, row_vehicle_type, require_monthly_payment=offers_only)
         if offers_only and not offer_out:
             continue
         estimated_monthly = _estimated_monthly_for_values(
@@ -681,7 +702,9 @@ def search_inventory(
             offer_map=manual_offer_map,
             ymm_offer_map=ymm_offer_map,
         )
-        offer_out = apply_offer_visibility(offer, (row.vehicle_type or "new").strip().lower())
+        offer_out = apply_offer_visibility(
+            offer, (row.vehicle_type or "new").strip().lower(), require_monthly_payment=offers_only
+        )
         if offers_only and not offer_out:
             continue
         estimated_monthly = _estimated_monthly_for_values(

@@ -1,4 +1,4 @@
-"""Map legacy hero slide paths saved in DB to current static filenames under frontend/public/images."""
+"""Map legacy landing image paths saved in DB to current filenames under frontend/public/images."""
 
 _LEGACY_HERO_SLIDE_URL_MAP: dict[str, str] = {
     "/images/landing_img (1).jpg": "/images/landing-1.jpg",
@@ -20,22 +20,45 @@ def normalize_hero_slide_url(url: str) -> str:
 
 
 def normalize_hero_slide_urls_in_payload(payload: dict) -> dict:
-    hero = payload.get("hero")
-    if not isinstance(hero, dict):
-        return payload
-    urls = hero.get("slide_urls")
-    if not isinstance(urls, list):
-        return payload
-    out: list = []
-    changed = False
-    for u in urls:
-        if isinstance(u, str):
-            nu = normalize_hero_slide_url(u)
-            if nu != u:
-                changed = True
-            out.append(nu)
+    """Normalize hero.slide_urls and how_it_works[].image_url (CMS often reuses slide paths)."""
+    out = payload
+    hero = out.get("hero")
+    if isinstance(hero, dict):
+        urls = hero.get("slide_urls")
+        if isinstance(urls, list):
+            slide_out: list = []
+            slide_changed = False
+            for u in urls:
+                if isinstance(u, str):
+                    nu = normalize_hero_slide_url(u)
+                    if nu != u:
+                        slide_changed = True
+                    slide_out.append(nu)
+                else:
+                    slide_out.append(u)
+            if slide_changed:
+                out = {**out, "hero": {**hero, "slide_urls": slide_out}}
+                hero = out["hero"]
+
+    how = out.get("how_it_works")
+    if not isinstance(how, list):
+        return out
+    new_how: list = []
+    how_changed = False
+    for item in how:
+        if not isinstance(item, dict):
+            new_how.append(item)
+            continue
+        url = item.get("image_url")
+        if isinstance(url, str):
+            nu = normalize_hero_slide_url(url)
+            if nu != url:
+                how_changed = True
+                new_how.append({**item, "image_url": nu})
+            else:
+                new_how.append(item)
         else:
-            out.append(u)
-    if not changed:
-        return payload
-    return {**payload, "hero": {**hero, "slide_urls": out}}
+            new_how.append(item)
+    if how_changed:
+        out = {**out, "how_it_works": new_how}
+    return out

@@ -22,7 +22,12 @@ def _clean_int(value) -> Optional[int]:
         return None
 
 
-def apply_offer_visibility(offer: Optional[OfferOverride], vehicle_type: Optional[str] = None):
+def apply_offer_visibility(
+    offer: Optional[OfferOverride],
+    vehicle_type: Optional[str] = None,
+    *,
+    require_monthly_payment: bool = False,
+):
     if not offer:
         return None
 
@@ -32,6 +37,9 @@ def apply_offer_visibility(offer: Optional[OfferOverride], vehicle_type: Optiona
     discounted_price = _clean_float(offer.discounted_price)
     term_months = _clean_int(offer.term_months)
     miles_per_year = _clean_int(offer.miles_per_year)
+
+    if require_monthly_payment and monthly_payment is None:
+        return None
 
     if down_payment is not None:
         out["down_payment"] = down_payment
