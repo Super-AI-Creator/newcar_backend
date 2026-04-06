@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -24,6 +25,8 @@ from app.models.enums import OfferSource
 from app.services.legacy_tables import build_inventory_query
 from app.services.make_normalization import canonicalize_make, normalize_text_token
 
+
+logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 GOOGLE_API_TIMEOUT_SECONDS = 30
@@ -348,11 +351,24 @@ def sync_offers(db: Session) -> Tuple[int, str]:
             }
         )
 
+    active_vins = set(resolved_by_vin.keys())
+    removed = _delete_stale_sheet_offer_overrides(db, active_vins)
+    if removed:
+        logger.info("Offers sheet sync removed %s stale sheet-sourced offer_overrides", removed)
+
     _bulk_upsert_offer_overrides(db, payload_rows)
     count = len(payload_rows)
 
     _upsert_meta(db, "offers", offers_sheet_id, offers_sheet_tab, row_hash, None)
     db.commit()
+
+    try:
+        from app.routes.inventory import clear_inventory_caches_after_offer_sheet_sync
+
+        clear_inventory_caches_after_offer_sheet_sync()
+    except Exception:
+        logger.exception("Failed to clear inventory caches after offers sync")
+
     return count, row_hash
 
 
@@ -403,6 +419,30 @@ def _match_vins_from_inventory_index(
     if not candidates:
         return []
     return [vin for vin, _ in candidates]
+
+
+def _delete_stale_sheet_offer_overrides(db: Session, active_vins: set[str]) -> int:
+    """Remove sheet-sourced overrides whose VINs are no longer on the offer sheet.
+
+    Broker/dealer rows are untouched. Upserts alone never deleted retired sheet rows,
+    which left stale vehicles on lease-specials until this cleanup.
+    """
+    q = db.query(OfferOverride.vin).filter(OfferOverride.source == OfferSource.sheet)
+    existing = {str(r[0]).strip().upper() for r in q.all() if r[0]}
+    stale = existing - active_vins
+    if not stale:
+        return 0
+    deleted_total = 0
+    stale_list = list(stale)
+    chunk_size = 500
+    for i in range(0, len(stale_list), chunk_size):
+        batch = stale_list[i : i + chunk_size]
+        deleted_total += (
+            db.query(OfferOverride)
+            .filter(OfferOverride.source == OfferSource.sheet, OfferOverride.vin.in_(batch))
+            .delete(synchronize_session=False)
+        )
+    return deleted_total
 
 
 def _bulk_upsert_offer_overrides(db: Session, rows: list[dict]) -> None:

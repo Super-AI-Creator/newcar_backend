@@ -286,6 +286,17 @@ def _filters_cache_set(key: str, payload: dict):
             _FILTERS_CACHE.pop(oldest_key, None)
 
 
+def clear_inventory_caches_after_offer_sheet_sync() -> None:
+    """Clear in-memory search/filter/homepage-special caches after offer sheet sync.
+
+    Lease specials read live offer_overrides; cached API responses could otherwise
+    show removed vehicles for up to the TTL window.
+    """
+    _SEARCH_CACHE.clear()
+    _FILTERS_CACHE.clear()
+    _HOMEPAGE_SPECIALS_CACHE.clear()
+
+
 def _resolve_month_key(month: Optional[str]) -> str:
     candidate = (month or "").strip()
     if not candidate:
