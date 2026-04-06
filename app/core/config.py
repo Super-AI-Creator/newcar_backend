@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     scores_sheet_id: Optional[str] = Field(None)
     scores_sheet_tab: Optional[str] = Field(None)
     sheets_auto_sync_enabled: bool = Field(False)
+    # In serverless (Vercel/Lambda), background threads are not reliable and can create lock noise.
+    # Keep disabled by default unless explicitly enabled.
+    sheets_auto_sync_allow_serverless: bool = Field(False)
     sheets_auto_sync_interval_minutes: int = Field(10)
     sheets_auto_sync_run_on_startup: bool = Field(True)
     sheets_auto_sync_lock_wait_seconds: int = Field(20)

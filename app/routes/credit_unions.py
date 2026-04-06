@@ -15,6 +15,7 @@ from app.core.deps import get_current_user, get_db, require_role
 from app.models.credit_union import CreditUnion, CreditUnionLoanProgram, CreditUnionDisclosure, CuMemberApproval
 from app.models.enums import UserRole
 from app.models.user import User
+from app.services.cu_member_scope import resolve_member_scope_user_id
 from app.services.sms import send_sms
 
 router = APIRouter(tags=["credit_unions"])
@@ -408,19 +409,27 @@ def create_approval(
 
 @router.get("/approvals/mine")
 def list_my_approvals(
+    member_user_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     role = user.role.value if hasattr(user.role, "value") else str(user.role)
     query = db.query(CuMemberApproval)
     if role in ("super_admin", "credit_union"):
-        if role == "credit_union" and user.credit_union_id:
+        if member_user_id is not None:
+            scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
+            query = query.filter(CuMemberApproval.user_id == scoped_user_id)
+        elif role == "credit_union" and user.credit_union_id:
             query = query.filter(CuMemberApproval.credit_union_id == user.credit_union_id)
         rows = query.order_by(CuMemberApproval.created_at.desc()).limit(100).all()
     else:
-        query = query.filter(
-            (CuMemberApproval.user_id == user.id) | (CuMemberApproval.member_email == user.email)
-        )
+        if member_user_id is not None:
+            scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
+            query = query.filter(CuMemberApproval.user_id == scoped_user_id)
+        else:
+            query = query.filter(
+                (CuMemberApproval.user_id == user.id) | (CuMemberApproval.member_email == user.email)
+            )
         rows = query.order_by(CuMemberApproval.created_at.desc()).limit(50).all()
     return {"items": [_serialize_approval(r, include_cu_name=True) for r in rows]}
 

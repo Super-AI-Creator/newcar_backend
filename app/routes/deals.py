@@ -11,6 +11,7 @@ from app.models.deal_event import DealEvent
 from app.models.enums import DealStatus
 from app.models.user import User
 from app.schemas.deals import DealCreateIn, DealEventOut, DealOut, DealUpdateIn
+from app.services.cu_member_scope import resolve_member_scope_user_id
 
 router = APIRouter(prefix="/deals", tags=["deals"])
 
@@ -130,12 +131,18 @@ def _parse_optional_datetime(value: Optional[str]) -> Optional[datetime]:
 
 
 @router.post("", response_model=DealOut)
-def create_deal(payload: DealCreateIn, user=Depends(get_current_user), db: Session = Depends(get_db)):
+def create_deal(
+    payload: DealCreateIn,
+    member_user_id: Optional[int] = Query(None),
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
     vin = payload.vin.strip().upper()
     existing = (
         db.query(Deal)
         .filter(
-            Deal.user_id == user.id,
+            Deal.user_id == scoped_user_id,
             Deal.vin == vin,
             Deal.status.in_(
                 [
@@ -154,7 +161,7 @@ def create_deal(payload: DealCreateIn, user=Depends(get_current_user), db: Sessi
         return _deal_dict_with_cu(db, existing)
 
     row = Deal(
-        user_id=user.id,
+        user_id=scoped_user_id,
         vin=vin,
         status=DealStatus.inquiry,
         customer_note=payload.customer_note.strip() if payload.customer_note else None,
@@ -164,7 +171,7 @@ def create_deal(payload: DealCreateIn, user=Depends(get_current_user), db: Sessi
     approval = (
         db.query(CuMemberApproval)
         .filter(
-            CuMemberApproval.user_id == user.id,
+            CuMemberApproval.user_id == scoped_user_id,
             CuMemberApproval.status.in_(["pending", "active", "funded"]),
         )
         .order_by(CuMemberApproval.created_at.desc())
@@ -190,10 +197,12 @@ def create_deal(payload: DealCreateIn, user=Depends(get_current_user), db: Sessi
 @router.get("/mine")
 def list_my_deals(
     status: Optional[str] = Query(None),
+    member_user_id: Optional[int] = Query(None),
     user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    query = db.query(Deal).filter(Deal.user_id == user.id)
+    scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
+    query = db.query(Deal).filter(Deal.user_id == scoped_user_id)
     if status:
         try:
             status_enum = DealStatus(status)
