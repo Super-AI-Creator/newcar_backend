@@ -22,12 +22,23 @@ from app.services.cu_member_scope import resolve_member_scope_user_id
 router = APIRouter(prefix="/credit", tags=["credit"])
 
 
+def _viewer_is_super_admin(viewer: Optional[User]) -> bool:
+    if viewer is None:
+        return False
+    role_value = viewer.role.value if hasattr(viewer.role, "value") else str(viewer.role)
+    return role_value == "super_admin"
+
+
 def _serialize_credit_application(
     row: CreditApplication,
     customer: Optional[User] = None,
     reviewer: Optional[User] = None,
+    viewer: Optional[User] = None,
 ) -> dict:
     payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+    if _viewer_is_super_admin(viewer) and payload:
+        base = {k: v for k, v in payload.items() if k not in ("formatted_plain", "formatted_html")}
+        payload = enrich_payload_with_formatted(dict(base), mask_sensitive=False)
     customer_name = (
         customer.name
         if customer
@@ -146,6 +157,7 @@ def list_credit_applications(
             row,
             customer=user_map.get(int(row.user_id)) if row.user_id is not None else None,
             reviewer=user_map.get(int(row.reviewed_by_user_id)) if row.reviewed_by_user_id is not None else None,
+            viewer=user,
         )
         for row in rows
     ]
@@ -157,7 +169,7 @@ def update_credit_application(
     application_id: int,
     payload: dict,
     db: Session = Depends(get_db),
-    user=Depends(require_role("broker_admin", "admin")),
+    user=Depends(require_role("broker_admin", "admin", "super_admin")),
 ):
     row = db.query(CreditApplication).filter(CreditApplication.id == application_id).first()
     if not row:
@@ -177,7 +189,7 @@ def update_credit_application(
     db.refresh(row)
     customer = db.query(User).filter(User.id == row.user_id).first() if row.user_id is not None else None
     reviewer = db.query(User).filter(User.id == row.reviewed_by_user_id).first() if row.reviewed_by_user_id is not None else None
-    return _serialize_credit_application(row, customer=customer, reviewer=reviewer)
+    return _serialize_credit_application(row, customer=customer, reviewer=reviewer, viewer=user)
 
 
 @router.get("/mine")
