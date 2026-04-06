@@ -319,6 +319,19 @@ class ApprovalCreate(BaseModel):
     member_email: Optional[str] = None
 
 
+class ApprovalUpdate(BaseModel):
+    status: Optional[str] = None
+
+
+_ALLOWED_APPROVAL_STATUSES = {
+    "pending",
+    "active",
+    "funded",
+    "lost",
+    "canceled",
+    "claimed",
+}
+
 def _can_manage_cu(user: User, cu_id: int) -> bool:
     role = user.role.value if hasattr(user.role, "value") else str(user.role)
     if role == "super_admin":
@@ -422,11 +435,52 @@ def get_approval_by_code(code: str, db: Session = Depends(get_db)):
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found.")
     cu = db.query(CreditUnion).filter(CreditUnion.id == approval.credit_union_id).first()
+    base = (settings.frontend_base_url or "").rstrip("/")
+    portal_url = None
+    if cu and cu.slug and base:
+        portal_url = f"{base}/cu/{cu.slug}"
     return {
         **_serialize_approval(approval),
         "credit_union_name": cu.name if cu else None,
         "credit_union_slug": cu.slug if cu else None,
+        "credit_union_logo_url": (cu.logo_url or "").strip() or None if cu else None,
+        "credit_union_address": (cu.address or "").strip() or None if cu else None,
+        "credit_union_phone": (cu.phone or "").strip() or None if cu else None,
+        "credit_union_portal_url": portal_url,
+        "contact_name": (cu.contact_name or "").strip() or None if cu else None,
+        "contact_phone": (cu.contact_phone or "").strip() or None if cu else None,
+        "contact_email": (cu.contact_email or "").strip() or None if cu else None,
     }
+
+
+@router.patch("/admin/credit-unions/{cu_id}/approvals/{approval_id}")
+def update_approval_status(
+    cu_id: int,
+    approval_id: int,
+    payload: ApprovalUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not _can_manage_cu(user, cu_id):
+        raise HTTPException(status_code=403, detail="Not allowed to update approvals for this credit union.")
+    approval = (
+        db.query(CuMemberApproval)
+        .filter(CuMemberApproval.id == approval_id, CuMemberApproval.credit_union_id == cu_id)
+        .first()
+    )
+    if not approval:
+        raise HTTPException(status_code=404, detail="Approval not found.")
+    if payload.status is not None:
+        status = (payload.status or "").strip().lower()
+        if status not in _ALLOWED_APPROVAL_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Status must be one of: {', '.join(sorted(_ALLOWED_APPROVAL_STATUSES))}.",
+            )
+        approval.status = status
+    db.commit()
+    db.refresh(approval)
+    return {"item": _serialize_approval(approval)}
 
 
 @router.patch("/approvals/claim/{code}")
