@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     twilio_auth_token: Optional[str] = Field(None)
     twilio_from_phone: Optional[str] = Field(None)
     frontend_base_url: str = Field("https://newcarsuperstore.com")
+    # Optional comma-separated CORS origins for manage_backend.
+    cors_origins: Optional[str] = Field(None)
+    # Optional comma-separated list of extra origins for the standalone CU API.
+    # Parsed by credit_union_platform/backend/main.py.
+    cu_cors_origins: Optional[str] = Field(None)
+    # When set, CU approval letter / SMS claim links and white-label portal URLs use this base
+    # (standalone credit union web app) instead of frontend_base_url.
+    cu_portal_base_url: Optional[str] = Field(None)
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 

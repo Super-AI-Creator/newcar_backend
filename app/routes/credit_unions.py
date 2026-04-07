@@ -391,7 +391,7 @@ def create_approval(
     db.add(approval)
     db.commit()
     db.refresh(approval)
-    base = (settings.frontend_base_url or "").rstrip("/")
+    base = (settings.cu_portal_base_url or settings.frontend_base_url or "").rstrip("/")
     claim_url = f"{base}/approvals/{approval.approval_code}"
     join_url = f"{base}/creditunions/join?token={cu.signup_token}&approval={approval.approval_code}"
     sms_sent = False
@@ -444,7 +444,7 @@ def get_approval_by_code(code: str, db: Session = Depends(get_db)):
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found.")
     cu = db.query(CreditUnion).filter(CreditUnion.id == approval.credit_union_id).first()
-    base = (settings.frontend_base_url or "").rstrip("/")
+    base = (settings.cu_portal_base_url or settings.frontend_base_url or "").rstrip("/")
     portal_url = None
     if cu and cu.slug and base:
         portal_url = f"{base}/cu/{cu.slug}"

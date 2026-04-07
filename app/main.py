@@ -22,10 +22,16 @@ logger = logging.getLogger(__name__)
 _cors_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:3100",
+    "http://127.0.0.1:3100",
     "https://newcar-frontend.vercel.app",
     "http://newcar-frontend.vercel.app",
     "https://newcarsuperstore.com",
     "http://newcarsuperstore.com",
+    "http://power-auto-buying-nextjs.vercel.app",
+    "https://power-auto-buying-nextjs.vercel.app"
 ]
 _extra = os.getenv("CORS_ORIGINS", "").strip()
 if _extra:
