@@ -73,7 +73,8 @@ def list_messages(
     role_value = user.role.value if hasattr(user.role, "value") else str(user.role)
     scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
     query = db.query(BrokerMessage)
-    if role_value not in {"broker_admin", "admin", "super_admin"} or member_user_id is not None:
+    elevated_inbox = {"broker_admin", "admin", "super_admin", "dealer"}
+    if role_value not in elevated_inbox or member_user_id is not None:
         query = query.filter(BrokerMessage.user_id == scoped_user_id)
     rows = query.order_by(BrokerMessage.created_at.desc()).all()
     broker_user_ids = sorted(
@@ -93,12 +94,38 @@ def list_messages(
         sender_type, body = parse_message_from_storage(row.message_text)
         broker_user = broker_map.get(int(row.broker_admin_user_id)) if row.broker_admin_user_id is not None else None
         customer_user = customer_map.get(int(row.user_id)) if row.user_id is not None else None
+        if sender_type == "customer":
+            is_member_viewing_self = (
+                role_value == "customer"
+                and member_user_id is None
+                and row.user_id is not None
+                and int(row.user_id) == int(scoped_user_id)
+            )
+            if is_member_viewing_self:
+                sender_label = "You"
+            else:
+                sender_label = (
+                    (customer_user.name if customer_user and customer_user.name else None)
+                    or (customer_user.email if customer_user else None)
+                    or "Member"
+                )
+        elif sender_type == "broker":
+            sender_label = (
+                (broker_user.name if broker_user and broker_user.name else None)
+                or (broker_user.email if broker_user else None)
+                or "Dealer"
+            )
+        elif sender_type == "credit_union":
+            sender_label = "Credit Union"
+        else:
+            sender_label = "Member"
         items.append(
             {
                 "id": str(row.id),
                 "vin": row.vin,
                 "body": body,
                 "senderType": sender_type,
+                "senderLabel": sender_label,
                 "createdAt": str(row.created_at) if row.created_at else None,
                 "userId": str(row.user_id) if row.user_id is not None else None,
                 "customerName": customer_user.name if customer_user else None,

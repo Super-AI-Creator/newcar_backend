@@ -16,7 +16,7 @@ def resolve_member_scope_user_id(
 
     - Normal customers can only act as themselves.
     - Credit union users can act on members linked to their CU via approvals.
-    - Admin/broker/super_admin may optionally pass member_user_id.
+    - Admin, broker, dealer, or super_admin may optionally pass member_user_id.
     """
     requester_id = int(request_user.id)
     if member_user_id is None:
@@ -27,7 +27,7 @@ def resolve_member_scope_user_id(
     role_value = request_user.role.value if hasattr(request_user.role, "value") else str(request_user.role)
     target_id = int(member_user_id)
 
-    if role_value in {"admin", "broker_admin", "super_admin"}:
+    if role_value in {"admin", "broker_admin", "super_admin", "dealer"}:
         return target_id
 
     if role_value != "credit_union":

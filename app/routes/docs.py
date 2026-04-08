@@ -99,7 +99,7 @@ def list_doc_submissions(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    user=Depends(require_role("broker_admin", "admin", "super_admin")),
+    user=Depends(require_role("broker_admin", "admin", "super_admin", "dealer")),
 ):
     _ = user
     query = db.query(DocumentSubmission).order_by(DocumentSubmission.created_at.desc())
@@ -158,7 +158,7 @@ def update_doc_submission(
     submission_id: int,
     payload: dict,
     db: Session = Depends(get_db),
-    user=Depends(require_role("broker_admin", "admin")),
+    user=Depends(require_role("broker_admin", "admin", "super_admin", "dealer")),
 ):
     row = db.query(DocumentSubmission).filter(DocumentSubmission.id == submission_id).first()
     if not row:
@@ -186,7 +186,7 @@ def download_doc_file(
     submission_id: int,
     kind: str,
     db: Session = Depends(get_db),
-    user=Depends(require_role("broker_admin", "admin", "super_admin")),
+    user=Depends(require_role("broker_admin", "admin", "super_admin", "dealer")),
 ):
     _ = user
     row = db.query(DocumentSubmission).filter(DocumentSubmission.id == submission_id).first()

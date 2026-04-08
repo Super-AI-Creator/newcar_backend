@@ -1,11 +1,12 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user, get_db, require_role
 from app.models.broker_message import BrokerMessage
+from app.models.credit_union import CuMemberApproval
 from app.models.user import User
 from app.schemas.misc import BrokerMessageIn, BrokerReplyIn
 from app.services.broker_messages import encode_message_for_storage, parse_message_from_storage
@@ -56,7 +57,11 @@ def send_message(
 
 
 @router.post("/reply")
-def reply_to_customer(payload: BrokerReplyIn, user=Depends(require_role("broker_admin")), db: Session = Depends(get_db)):
+def reply_to_customer(
+    payload: BrokerReplyIn,
+    user=Depends(require_role("broker_admin", "dealer")),
+    db: Session = Depends(get_db),
+):
     msg = BrokerMessage(
         user_id=payload.customer_user_id,
         vin=payload.vin,
@@ -66,3 +71,39 @@ def reply_to_customer(payload: BrokerReplyIn, user=Depends(require_role("broker_
     db.add(msg)
     db.commit()
     return {"status": "sent", "broker_admin_user_id": user.id}
+
+
+@router.post("/cu-reply")
+def credit_union_reply_to_member(
+    payload: BrokerReplyIn,
+    user=Depends(require_role("credit_union")),
+    db: Session = Depends(get_db),
+):
+    """Staff message in the member's deal thread (same row store as dealer/member chat)."""
+    cu_id = getattr(user, "credit_union_id", None)
+    if not cu_id:
+        raise HTTPException(status_code=403, detail="No credit union assigned to this account.")
+    member_ok = (
+        db.query(CuMemberApproval)
+        .filter(
+            CuMemberApproval.user_id == int(payload.customer_user_id),
+            CuMemberApproval.credit_union_id == int(cu_id),
+        )
+        .first()
+    )
+    if not member_ok:
+        raise HTTPException(
+            status_code=403,
+            detail="That member is not linked to an approval for your credit union.",
+        )
+    assigned_broker_user_id = select_next_broker_admin_user_id(db)
+    msg = BrokerMessage(
+        user_id=payload.customer_user_id,
+        vin=payload.vin,
+        message_text=encode_message_for_storage(payload.message_text, sender_type="credit_union"),
+        broker_admin_user_id=assigned_broker_user_id,
+    )
+    db.add(msg)
+    db.commit()
+    db.refresh(msg)
+    return {"status": "sent", "id": int(msg.id)}

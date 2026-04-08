@@ -89,6 +89,12 @@ class Settings(BaseSettings):
     # When set, CU approval letter / SMS claim links and white-label portal URLs use this base
     # (standalone credit union web app) instead of frontend_base_url.
     cu_portal_base_url: Optional[str] = Field(None)
+    # Marketing demo form on CU landing: notify this address (default chris@carscu.com).
+    cu_demo_contact_notify_email: str = Field("chris@carscu.com")
+    # Per client IP (or X-Forwarded-For) sliding-window cap for POST /public/cu-demo-contact.
+    cu_demo_contact_rate_limit_per_minute: int = Field(8, ge=1, le=120)
+    # When set, member/broker deal-room messages assign to this broker_admin user only (e.g. Power Auto Buying).
+    broker_single_assign_email: Optional[str] = Field(None)
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 

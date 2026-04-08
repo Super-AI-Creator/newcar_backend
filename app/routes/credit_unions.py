@@ -20,6 +20,8 @@ from app.services.sms import send_sms
 
 router = APIRouter(tags=["credit_unions"])
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+# Internal reference / approval lookup: letters, digits, hyphen, underscore (1–64 chars)
+_APPROVAL_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _slug(s: str) -> str:
@@ -310,6 +312,32 @@ def get_credit_union_by_signup_token(token: str = Query(..., alias="token"), db:
     return _serialize_cu(cu)
 
 
+@router.get("/credit-unions/mine")
+def get_my_credit_union_staff_dashboard(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Signup link and token for the logged-in credit union staff member's organization (not for platform admins)."""
+    role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if role != "credit_union":
+        raise HTTPException(status_code=403, detail="Credit union staff only.")
+    cu_id = getattr(user, "credit_union_id", None)
+    if not cu_id:
+        raise HTTPException(status_code=403, detail="No credit union assigned to this account.")
+    cu = db.query(CreditUnion).filter(CreditUnion.id == int(cu_id)).first()
+    if not cu:
+        raise HTTPException(status_code=404, detail="Credit union not found.")
+    rel = f"/creditunions/join?token={cu.signup_token}" if cu.signup_token else None
+    base = (settings.cu_portal_base_url or settings.frontend_base_url or "").rstrip("/")
+    signup_link = f"{base}{rel}" if (base and rel) else rel
+    return {
+        "name": cu.name,
+        "slug": cu.slug,
+        "signup_token": cu.signup_token,
+        "signup_link": signup_link,
+    }
+
+
 # ---------- Pre-approvals ----------
 class ApprovalCreate(BaseModel):
     loan_amount: float
@@ -322,6 +350,7 @@ class ApprovalCreate(BaseModel):
 
 class ApprovalUpdate(BaseModel):
     status: Optional[str] = None
+    approval_code: Optional[str] = None
 
 
 _ALLOWED_APPROVAL_STATUSES = {
@@ -340,6 +369,24 @@ def _can_manage_cu(user: User, cu_id: int) -> bool:
     if role == "credit_union" and getattr(user, "credit_union_id", None) == cu_id:
         return True
     return False
+
+
+def _can_create_cu_preapproval(user: User, cu_id: int) -> bool:
+    """Pre-approvals are issued by credit union staff only, not platform admins."""
+    role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    return role == "credit_union" and getattr(user, "credit_union_id", None) == cu_id
+
+
+def _validate_approval_reference_code(code: str) -> str:
+    c = (code or "").strip()
+    if not c or len(c) > 64:
+        raise HTTPException(status_code=400, detail="Reference code must be 1–64 characters.")
+    if not _APPROVAL_CODE_RE.match(c):
+        raise HTTPException(
+            status_code=400,
+            detail="Reference code may only contain letters, numbers, hyphens, and underscores.",
+        )
+    return c
 
 
 def _serialize_approval(a: CuMemberApproval, include_cu_name: bool = False) -> dict:
@@ -373,11 +420,28 @@ def create_approval(
     cu = db.query(CreditUnion).filter(CreditUnion.id == cu_id).first()
     if not cu:
         raise HTTPException(status_code=404, detail="Credit union not found.")
-    if not _can_manage_cu(user, cu_id):
-        raise HTTPException(status_code=403, detail="Not allowed to create approvals for this credit union.")
-    code = (payload.approval_code or "").strip() or secrets.token_urlsafe(12).upper()[:16]
-    if db.query(CuMemberApproval).filter(CuMemberApproval.approval_code == code).first():
-        code = secrets.token_urlsafe(12).upper()[:16]
+    if not _can_create_cu_preapproval(user, cu_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Only credit union staff can create pre-approvals for their organization.",
+        )
+    desired = (payload.approval_code or "").strip()
+    if desired:
+        code = _validate_approval_reference_code(desired)
+        if db.query(CuMemberApproval).filter(CuMemberApproval.approval_code == code).first():
+            raise HTTPException(
+                status_code=400,
+                detail="This reference code is already in use. Choose a different one.",
+            )
+    else:
+        code = None
+        for _ in range(24):
+            candidate = secrets.token_urlsafe(12).upper()[:16]
+            if not db.query(CuMemberApproval).filter(CuMemberApproval.approval_code == candidate).first():
+                code = candidate
+                break
+        if not code:
+            raise HTTPException(status_code=500, detail="Could not assign a unique approval code.")
     approval = CuMemberApproval(
         credit_union_id=cu_id,
         loan_amount=Decimal(str(payload.loan_amount)),
@@ -410,6 +474,7 @@ def create_approval(
 @router.get("/approvals/mine")
 def list_my_approvals(
     member_user_id: Optional[int] = Query(None),
+    credit_union_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -419,6 +484,8 @@ def list_my_approvals(
         if member_user_id is not None:
             scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
             query = query.filter(CuMemberApproval.user_id == scoped_user_id)
+        elif role == "super_admin" and credit_union_id is not None:
+            query = query.filter(CuMemberApproval.credit_union_id == int(credit_union_id))
         elif role == "credit_union" and user.credit_union_id:
             query = query.filter(CuMemberApproval.credit_union_id == user.credit_union_id)
         rows = query.order_by(CuMemberApproval.created_at.desc()).limit(100).all()
@@ -479,7 +546,34 @@ def update_approval_status(
     )
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found.")
+    if payload.status is None and payload.approval_code is None:
+        raise HTTPException(status_code=400, detail="Provide status and/or approval_code to update.")
+
+    if payload.approval_code is not None:
+        if not _can_create_cu_preapproval(user, cu_id):
+            raise HTTPException(
+                status_code=403,
+                detail="Only credit union staff can change the reference code.",
+            )
+        new_code = _validate_approval_reference_code(payload.approval_code)
+        taken = (
+            db.query(CuMemberApproval)
+            .filter(
+                CuMemberApproval.approval_code == new_code,
+                CuMemberApproval.id != approval.id,
+            )
+            .first()
+        )
+        if taken:
+            raise HTTPException(
+                status_code=400,
+                detail="This reference code is already in use. Choose a different one.",
+            )
+        approval.approval_code = new_code
+
     if payload.status is not None:
+        if not _can_manage_cu(user, cu_id):
+            raise HTTPException(status_code=403, detail="Not allowed to update approvals for this credit union.")
         status = (payload.status or "").strip().lower()
         if status not in _ALLOWED_APPROVAL_STATUSES:
             raise HTTPException(

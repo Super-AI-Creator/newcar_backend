@@ -14,6 +14,7 @@ class UserOut(BaseModel):
     name: str
     role: str
     credit_union_id: Optional[int] = None
+    credit_union_name: Optional[str] = None
     is_phone_verified: bool
     is_email_verified: bool
 

@@ -6,7 +6,7 @@ import json
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import case, func, or_, select, true
 from sqlalchemy.orm import Session
 
@@ -34,6 +34,8 @@ from app.models.landing_page_content import LandingPageContent
 from app.models.sheet_sources_meta import SheetSourceMeta
 from app.models.testimonial import Testimonial
 from app.models.article import Article
+from app.models.credit_union import CreditUnion
+from app.models.dealer_dashboard_setting import DealerDashboardSetting
 from app.models.user import User
 from app.schemas.user import UserOut
 from app.services.cloudinary import CloudinaryUploadError, cloudinary_is_configured, upload_image_to_cloudinary
@@ -59,7 +61,7 @@ _MANUAL_PHOTO_UPLOAD_DIR = Path(__file__).resolve().parents[2] / "uploads" / "ma
 
 
 @router.get("/sources")
-def sources(db: Session = Depends(get_db), user=Depends(require_role("broker_admin"))):
+def sources(db: Session = Depends(get_db), user=Depends(require_role("broker_admin", "super_admin"))):
     tables = load_legacy_tables(engine)
     dealer_sources = tables["dealer_sources"]
     query = select(dealer_sources)
@@ -71,6 +73,62 @@ def sources(db: Session = Depends(get_db), user=Depends(require_role("broker_adm
         results.append({k: v for k, v in mapping.items()})
 
     return {"items": results}
+
+
+def _serialize_dealer_source_row(mapping: dict) -> dict:
+    out = {}
+    for k, v in mapping.items():
+        if hasattr(v, "isoformat"):
+            out[k] = v.isoformat()
+        else:
+            out[k] = v
+    return out
+
+
+@router.get("/dealer-sources")
+def admin_dealer_sources_with_dashboard_flags(
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    tables = load_legacy_tables(engine)
+    dealer_sources = tables["dealer_sources"]
+    rows = db.execute(select(dealer_sources)).fetchall()
+    settings_map = {int(r.dealer_source_id): bool(r.dashboard_activated) for r in db.query(DealerDashboardSetting).all()}
+    results = []
+    for row in rows:
+        m = _serialize_dealer_source_row(dict(row._mapping))
+        sid = m.get("id")
+        try:
+            sid_int = int(sid) if sid is not None else None
+        except (TypeError, ValueError):
+            sid_int = None
+        m["dashboard_activated"] = bool(settings_map.get(sid_int, False)) if sid_int is not None else False
+        results.append(m)
+    return {"items": results}
+
+
+class DealerDashboardPatch(BaseModel):
+    dashboard_activated: bool
+
+
+@router.put("/dealer-sources/{source_id}/dashboard")
+def admin_put_dealer_dashboard_setting(
+    source_id: int,
+    payload: DealerDashboardPatch,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    row = db.query(DealerDashboardSetting).filter(DealerDashboardSetting.dealer_source_id == source_id).first()
+    if not row:
+        row = DealerDashboardSetting(dealer_source_id=source_id, dashboard_activated=bool(payload.dashboard_activated))
+        db.add(row)
+    else:
+        row.dashboard_activated = bool(payload.dashboard_activated)
+    db.commit()
+    db.refresh(row)
+    return {"ok": True, "dealer_source_id": source_id, "dashboard_activated": row.dashboard_activated}
 
 
 @router.post("/sync-sheets")
@@ -517,6 +575,10 @@ class ManualVehicleUpsert(BaseModel):
     miles_per_year: Optional[int] = None
 
 
+class ManualVehiclesBulkDeletePayload(BaseModel):
+    vins: list[str] = []
+
+
 class SeoPageSettingUpsert(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
@@ -800,6 +862,42 @@ def delete_manual_vehicle(
     db.delete(row)
     db.commit()
     return {"deleted": True, "vin": normalized_vin}
+
+
+@router.post("/manual-vehicles/bulk-delete")
+def bulk_delete_manual_vehicles(
+    payload: ManualVehiclesBulkDeletePayload,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    normalized_vins: list[str] = []
+    seen: set[str] = set()
+    for vin in payload.vins:
+        normalized = _normalize_vin(vin)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        normalized_vins.append(normalized)
+
+    if not normalized_vins:
+        raise HTTPException(status_code=400, detail="At least one VIN is required.")
+
+    rows = db.query(ManualVehicle).filter(ManualVehicle.vin.in_(normalized_vins)).all()
+    found_vins = {row.vin for row in rows if row.vin}
+    deleted_vins: list[str] = []
+    for row in rows:
+        deleted_vins.append(row.vin)
+        db.delete(row)
+    db.commit()
+
+    not_found_vins = [vin for vin in normalized_vins if vin not in found_vins]
+    return {
+        "requested_count": len(normalized_vins),
+        "deleted_count": len(deleted_vins),
+        "deleted_vins": deleted_vins,
+        "not_found_vins": not_found_vins,
+    }
 
 
 @router.get("/seo-settings")
@@ -1106,17 +1204,76 @@ def admin_upsert_landing_page(
 
 @router.get("/users", response_model=list[UserOut])
 def admin_list_users(
+    role: Optional[str] = Query(None),
+    limit: int = Query(500, ge=1, le=2000),
     db: Session = Depends(get_db),
     user=Depends(require_role("super_admin")),
 ):
     _ = user
-    rows = (
-        db.query(User)
-        .order_by(User.created_at.desc(), User.id.desc())
-        .limit(500)
-        .all()
+    q = db.query(User, CreditUnion.name).outerjoin(CreditUnion, User.credit_union_id == CreditUnion.id)
+    if role and role.strip():
+        role_clean = role.strip().lower()
+        try:
+            q = q.filter(User.role == UserRole(role_clean))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid role filter.") from exc
+    rows = q.order_by(User.created_at.desc(), User.id.desc()).limit(limit).all()
+    out: list[UserOut] = []
+    for u, cu_name in rows:
+        base = UserOut.model_validate(u)
+        out.append(base.model_copy(update={"credit_union_name": cu_name}))
+    return out
+
+
+class AdminUserCreate(BaseModel):
+    email: EmailStr
+    name: str
+    password: str
+    role: str
+    credit_union_id: Optional[int] = None
+
+
+@router.post("/users", response_model=UserOut)
+def admin_create_user(
+    payload: AdminUserCreate,
+    db: Session = Depends(get_db),
+    current=Depends(require_role("super_admin")),
+):
+    _ = current
+    try:
+        role_enum = UserRole(payload.role.strip().lower())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid role.") from exc
+    if role_enum == UserRole.credit_union and not payload.credit_union_id:
+        raise HTTPException(status_code=400, detail="credit_union role requires credit_union_id.")
+    email = str(payload.email).strip().lower()
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=400, detail="A user with this email already exists.")
+    pwd = (payload.password or "").strip()
+    if len(pwd) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required.")
+    row = User(
+        email=email,
+        name=name,
+        role=role_enum,
+        password_hash=hash_password(pwd),
+        credit_union_id=payload.credit_union_id,
+        phone=None,
+        is_email_verified=True,
+        is_phone_verified=False,
     )
-    return [UserOut.model_validate(row) for row in rows]
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    cu_name = None
+    if row.credit_union_id:
+        cu = db.query(CreditUnion).filter(CreditUnion.id == row.credit_union_id).first()
+        cu_name = cu.name if cu else None
+    base = UserOut.model_validate(row)
+    return base.model_copy(update={"credit_union_name": cu_name})
 
 
 class AdminUserUpdate(BaseModel):
