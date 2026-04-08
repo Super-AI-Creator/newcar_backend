@@ -20,6 +20,8 @@ def _iso_or_none(value: Optional[datetime]) -> Optional[str]:
 
 
 def build_lead_webhook_payload(row: LeadRequest) -> Dict[str, Any]:
+    raw_notes = (row.notes or "").strip()
+    notes = raw_notes if raw_notes else "No note"
     return {
         "lead_id": int(row.id),
         "created_at": _iso_or_none(row.created_at),
@@ -33,7 +35,7 @@ def build_lead_webhook_payload(row: LeadRequest) -> Dict[str, Any]:
         "trim": row.trim,
         "vehicle": row.vehicle,
         "source": row.source,
-        "notes": row.notes,
+        "notes": notes,
     }
 
 
