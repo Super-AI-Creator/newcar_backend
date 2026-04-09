@@ -83,7 +83,7 @@ def credit_union_reply_to_member(
     cu_id = getattr(user, "credit_union_id", None)
     if not cu_id:
         raise HTTPException(status_code=403, detail="No credit union assigned to this account.")
-    member_ok = (
+    member_has_approval_link = (
         db.query(CuMemberApproval)
         .filter(
             CuMemberApproval.user_id == int(payload.customer_user_id),
@@ -91,10 +91,16 @@ def credit_union_reply_to_member(
         )
         .first()
     )
-    if not member_ok:
+    member_user = db.query(User).filter(User.id == int(payload.customer_user_id)).first()
+    member_assigned_to_cu = (
+        member_user is not None
+        and getattr(member_user, "credit_union_id", None) is not None
+        and int(getattr(member_user, "credit_union_id")) == int(cu_id)
+    )
+    if not member_has_approval_link and not member_assigned_to_cu:
         raise HTTPException(
             status_code=403,
-            detail="That member is not linked to an approval for your credit union.",
+            detail="That member is not linked to your credit union.",
         )
     assigned_broker_user_id = select_next_broker_admin_user_id(db)
     msg = BrokerMessage(

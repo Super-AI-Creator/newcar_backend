@@ -45,7 +45,13 @@ def resolve_member_scope_user_id(
         )
         .first()
     )
-    if not link_exists:
+    target_user = db.query(User).filter(User.id == target_id).first()
+    member_assigned_to_cu = (
+        target_user is not None
+        and getattr(target_user, "credit_union_id", None) is not None
+        and int(getattr(target_user, "credit_union_id")) == int(cu_id)
+    )
+    if not link_exists and not member_assigned_to_cu:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Member is not linked to this credit union.")
 
     return target_id

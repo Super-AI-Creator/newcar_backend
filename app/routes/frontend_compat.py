@@ -183,7 +183,7 @@ def credit_application_compat(
 ):
     raw = payload if isinstance(payload, dict) else {}
     vin = raw.get("vin")
-    merged = enrich_payload_with_formatted(raw, mask_sensitive=True)
+    merged = enrich_payload_with_formatted(raw, mask_sensitive=False)
     row = CreditApplication(
         user_id=user.id,
         vin=vin,

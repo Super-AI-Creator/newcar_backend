@@ -7,14 +7,27 @@ from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.email import EmailDeliveryError, send_email
 from app.core.deps import get_current_user, get_db, require_role
-from app.models.credit_union import CreditUnion, CreditUnionLoanProgram, CreditUnionDisclosure, CuMemberApproval
+from app.models.broker_message import BrokerMessage
+from app.models.credit_union import (
+    CreditUnion,
+    CreditUnionLoanProgram,
+    CreditUnionDisclosure,
+    CreditUnionMemberInvite,
+    CuMemberApproval,
+)
+from app.models.deal import Deal
+from app.models.document_submission import DocumentSubmission
 from app.models.enums import UserRole
+from app.models.favorite import Favorite
 from app.models.user import User
+from app.schemas.user import UserOut
 from app.services.cu_member_scope import resolve_member_scope_user_id
 from app.services.sms import send_sms
 
@@ -54,6 +67,22 @@ class CreditUnionCreate(BaseModel):
     contact_email: Optional[str] = None
     loan_programs: List[LoanProgramIn] = []
     disclosures: List[DisclosureIn] = []
+
+
+class MemberInviteCreate(BaseModel):
+    """Optional email locks signup to that address for this one-time link."""
+
+    invited_email: Optional[str] = None
+
+    @field_validator("invited_email", mode="before")
+    @classmethod
+    def normalize_invited_email(cls, v: object) -> Optional[str]:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            s = v.strip().lower()
+            return s or None
+        return None
 
 
 class CreditUnionUpdate(BaseModel):
@@ -108,6 +137,10 @@ def _serialize_cu(cu: CreditUnion, include_relations: bool = True) -> dict:
             for d in sorted(cu.disclosures, key=lambda x: (x.sort_order, x.id))
         ]
     return out
+
+
+def _portal_base_url() -> str:
+    return (settings.cu_portal_base_url or settings.frontend_base_url or "").rstrip("/")
 
 
 # ---------- Admin: Credit Unions (super_admin) ----------
@@ -312,6 +345,31 @@ def get_credit_union_by_signup_token(token: str = Query(..., alias="token"), db:
     return _serialize_cu(cu)
 
 
+@router.get("/credit-unions/by-invite")
+def get_credit_union_by_member_invite(invite: str = Query(..., alias="invite"), db: Session = Depends(get_db)):
+    """Public: resolve an unused personal member invite to the parent credit union (for join/register preview)."""
+    raw = (invite or "").strip()
+    if not raw:
+        raise HTTPException(status_code=404, detail="Invalid invitation.")
+    inv = (
+        db.query(CreditUnionMemberInvite)
+        .filter(
+            CreditUnionMemberInvite.token == raw,
+            CreditUnionMemberInvite.used_at.is_(None),
+        )
+        .first()
+    )
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invalid or already used invitation link.")
+    cu = db.query(CreditUnion).filter(CreditUnion.id == inv.credit_union_id, CreditUnion.is_active == True).first()
+    if not cu:
+        raise HTTPException(status_code=404, detail="This invitation is no longer valid.")
+    out = _serialize_cu(cu)
+    out["is_personal_invite"] = True
+    out["invited_email"] = inv.invited_email
+    return out
+
+
 @router.get("/credit-unions/mine")
 def get_my_credit_union_staff_dashboard(
     db: Session = Depends(get_db),
@@ -338,10 +396,178 @@ def get_my_credit_union_staff_dashboard(
     }
 
 
+@router.get("/credit-unions/mine/members")
+def list_my_credit_union_members(
+    limit: int = Query(500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Credit union staff: list customer accounts assigned to their own credit union."""
+    role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if role != "credit_union":
+        raise HTTPException(status_code=403, detail="Credit union staff only.")
+    cu_id = getattr(user, "credit_union_id", None)
+    if not cu_id:
+        raise HTTPException(status_code=403, detail="No credit union assigned to this account.")
+    cu = db.query(CreditUnion).filter(CreditUnion.id == int(cu_id)).first()
+    if not cu:
+        raise HTTPException(status_code=404, detail="Credit union not found.")
+    rows = (
+        db.query(User)
+        .filter(
+            User.credit_union_id == int(cu_id),
+            User.role == UserRole.customer,
+        )
+        .order_by(User.created_at.desc(), User.id.desc())
+        .limit(limit)
+        .all()
+    )
+    out: list[UserOut] = []
+    for r in rows:
+        base = UserOut.model_validate(r)
+        out.append(base.model_copy(update={"credit_union_name": cu.name}))
+    return {"items": out}
+
+
+@router.get("/credit-unions/mine/members/activity-summary")
+def list_my_credit_union_member_activity_summary(
+    limit: int = Query(2000, ge=1, le=5000),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Credit union staff: compact per-member activity counters for their assigned CU members."""
+    role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if role != "credit_union":
+        raise HTTPException(status_code=403, detail="Credit union staff only.")
+    cu_id = getattr(user, "credit_union_id", None)
+    if not cu_id:
+        raise HTTPException(status_code=403, detail="No credit union assigned to this account.")
+
+    member_ids = [
+        int(r[0])
+        for r in db.query(User.id)
+        .filter(
+            User.credit_union_id == int(cu_id),
+            User.role == UserRole.customer,
+        )
+        .order_by(User.id.desc())
+        .limit(limit)
+        .all()
+    ]
+    if not member_ids:
+        return {"items": []}
+
+    def _counts(model, user_col: str) -> dict[int, int]:
+        col = getattr(model, user_col)
+        rows = (
+            db.query(col, func.count(model.id))
+            .filter(col.in_(member_ids))
+            .group_by(col)
+            .all()
+        )
+        return {int(uid): int(cnt) for uid, cnt in rows if uid is not None}
+
+    approvals = _counts(CuMemberApproval, "user_id")
+    favorites = _counts(Favorite, "user_id")
+    messages = _counts(BrokerMessage, "user_id")
+    deals = _counts(Deal, "user_id")
+    docs = _counts(DocumentSubmission, "user_id")
+
+    out = []
+    for uid in member_ids:
+        out.append(
+            {
+                "user_id": uid,
+                "approvals": approvals.get(uid, 0),
+                "favorites": favorites.get(uid, 0),
+                "messages": messages.get(uid, 0),
+                "deals": deals.get(uid, 0),
+                "docs": docs.get(uid, 0),
+            }
+        )
+    return {"items": out}
+
+
+def _serialize_member_invite(inv: CreditUnionMemberInvite, base: str) -> dict:
+    rel_join = f"/creditunions/join?invite={inv.token}"
+    rel_register = f"/register?invite={inv.token}"
+    join_link = f"{base}{rel_join}" if base else rel_join
+    register_link = f"{base}{rel_register}" if base else rel_register
+    return {
+        "id": inv.id,
+        "invited_email": inv.invited_email,
+        "token": inv.token,
+        "used_at": str(inv.used_at) if inv.used_at else None,
+        "created_at": str(inv.created_at) if inv.created_at else None,
+        "join_link": join_link,
+        "register_link": register_link,
+        "is_used": inv.used_at is not None,
+    }
+
+
+@router.post("/credit-unions/mine/member-invites")
+def create_credit_union_member_invite(
+    payload: MemberInviteCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Credit union staff: create a one-time signup link for a specific member."""
+    role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if role != "credit_union":
+        raise HTTPException(status_code=403, detail="Credit union staff only.")
+    cu_id = getattr(user, "credit_union_id", None)
+    if not cu_id:
+        raise HTTPException(status_code=403, detail="No credit union assigned to this account.")
+    cu = db.query(CreditUnion).filter(CreditUnion.id == int(cu_id), CreditUnion.is_active == True).first()
+    if not cu:
+        raise HTTPException(status_code=404, detail="Credit union not found.")
+
+    tok = secrets.token_urlsafe(24)[:64]
+    while db.query(CreditUnionMemberInvite).filter(CreditUnionMemberInvite.token == tok).first():
+        tok = secrets.token_urlsafe(24)[:64]
+
+    inv = CreditUnionMemberInvite(
+        credit_union_id=cu.id,
+        token=tok,
+        invited_email=payload.invited_email,
+        created_by_user_id=user.id,
+    )
+    db.add(inv)
+    db.commit()
+    db.refresh(inv)
+
+    base = _portal_base_url()
+    return {"item": _serialize_member_invite(inv, base)}
+
+
+@router.get("/credit-unions/mine/member-invites")
+def list_credit_union_member_invites(
+    limit: int = Query(40, ge=1, le=100),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if role != "credit_union":
+        raise HTTPException(status_code=403, detail="Credit union staff only.")
+    cu_id = getattr(user, "credit_union_id", None)
+    if not cu_id:
+        raise HTTPException(status_code=403, detail="No credit union assigned to this account.")
+    rows = (
+        db.query(CreditUnionMemberInvite)
+        .filter(CreditUnionMemberInvite.credit_union_id == int(cu_id))
+        .order_by(CreditUnionMemberInvite.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    base = _portal_base_url()
+    return {"items": [_serialize_member_invite(r, base) for r in rows]}
+
+
 # ---------- Pre-approvals ----------
 class ApprovalCreate(BaseModel):
     loan_amount: float
     term_months: int
+    interest_rate: float
     special_notes: Optional[str] = None
     approval_code: Optional[str] = None
     member_phone: Optional[str] = None
@@ -351,6 +577,7 @@ class ApprovalCreate(BaseModel):
 class ApprovalUpdate(BaseModel):
     status: Optional[str] = None
     approval_code: Optional[str] = None
+    interest_rate: Optional[float] = None
 
 
 _ALLOWED_APPROVAL_STATUSES = {
@@ -396,6 +623,7 @@ def _serialize_approval(a: CuMemberApproval, include_cu_name: bool = False) -> d
         "user_id": a.user_id,
         "loan_amount": float(a.loan_amount) if a.loan_amount is not None else None,
         "term_months": a.term_months,
+        "interest_rate": float(a.interest_rate) if a.interest_rate is not None else None,
         "special_notes": a.special_notes,
         "approval_code": a.approval_code,
         "member_phone": a.member_phone,
@@ -425,6 +653,8 @@ def create_approval(
             status_code=403,
             detail="Only credit union staff can create pre-approvals for their organization.",
         )
+    if payload.interest_rate < 0:
+        raise HTTPException(status_code=400, detail="Rate must be a positive number.")
     desired = (payload.approval_code or "").strip()
     if desired:
         code = _validate_approval_reference_code(desired)
@@ -446,6 +676,7 @@ def create_approval(
         credit_union_id=cu_id,
         loan_amount=Decimal(str(payload.loan_amount)),
         term_months=payload.term_months,
+        interest_rate=Decimal(str(payload.interest_rate)),
         special_notes=(payload.special_notes or "").strip() or None,
         approval_code=code,
         member_phone=(payload.member_phone or "").strip() or None,
@@ -459,15 +690,35 @@ def create_approval(
     claim_url = f"{base}/approvals/{approval.approval_code}"
     join_url = f"{base}/creditunions/join?token={cu.signup_token}&approval={approval.approval_code}"
     sms_sent = False
+    email_sent = False
     if approval.member_phone:
         body = f"{cu.name}: You have a pre-approved auto loan. Create an account or log in to view: {claim_url}"
         sms_sent = send_sms(approval.member_phone, body)
+    if approval.member_email:
+        subject = f"{cu.name}: Your auto loan pre-approval is ready"
+        body = (
+            f"Hello,\n\n"
+            f"You have been pre-approved for an auto loan with {cu.name}.\n\n"
+            f"Approval amount: ${float(approval.loan_amount):,.2f}\n"
+            f"Term: {approval.term_months} months\n"
+            f"Rate: {float(approval.interest_rate):.2f}% APR\n"
+            f"Reference code: {approval.approval_code}\n\n"
+            f"Open your approval letter:\n{claim_url}\n\n"
+            f"Create/sign in to your member portal:\n{join_url}\n\n"
+            f"If you have questions, reply to this email or contact your credit union.\n"
+        )
+        try:
+            send_email(to_email=approval.member_email, subject=subject, body=body)
+            email_sent = True
+        except EmailDeliveryError:
+            email_sent = False
     return {
         "item": _serialize_approval(approval),
         "approval_code": approval.approval_code,
         "claim_url": claim_url,
         "join_url": join_url,
         "sms_sent": sms_sent,
+        "email_sent": email_sent,
     }
 
 
@@ -546,8 +797,8 @@ def update_approval_status(
     )
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found.")
-    if payload.status is None and payload.approval_code is None:
-        raise HTTPException(status_code=400, detail="Provide status and/or approval_code to update.")
+    if payload.status is None and payload.approval_code is None and payload.interest_rate is None:
+        raise HTTPException(status_code=400, detail="Provide status, approval_code, and/or interest_rate to update.")
 
     if payload.approval_code is not None:
         if not _can_create_cu_preapproval(user, cu_id):
@@ -581,6 +832,11 @@ def update_approval_status(
                 detail=f"Status must be one of: {', '.join(sorted(_ALLOWED_APPROVAL_STATUSES))}.",
             )
         approval.status = status
+
+    if payload.interest_rate is not None:
+        if payload.interest_rate < 0:
+            raise HTTPException(status_code=400, detail="Rate must be a positive number.")
+        approval.interest_rate = Decimal(str(payload.interest_rate))
     db.commit()
     db.refresh(approval)
     return {"item": _serialize_approval(approval)}

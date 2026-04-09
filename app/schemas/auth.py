@@ -32,6 +32,11 @@ class RegisterRequest(BaseModel):
     phone: Optional[str] = Field(default=None, max_length=50)
     channel: str = Field(default="email", pattern="^(email|sms)$")
     cu_signup_token: Optional[str] = Field(default=None, max_length=128)
+    member_invite_token: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="One-time personal invite from CU staff; takes precedence over cu_signup_token.",
+    )
 
 
 class RegisterVerifyRequest(BaseModel):
@@ -39,6 +44,7 @@ class RegisterVerifyRequest(BaseModel):
     code: str
     channel: str = Field(default="email", pattern="^(email|sms)$")
     cu_signup_token: Optional[str] = Field(default=None, max_length=128)
+    member_invite_token: Optional[str] = Field(default=None, max_length=128)
 
 
 class LoginRequest(BaseModel):

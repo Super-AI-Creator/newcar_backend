@@ -19,7 +19,7 @@ from app.core.security import (
 )
 from app.models.auth_otp import AuthOtp
 from app.models.enums import OtpChannel, UserRole
-from app.models.credit_union import CreditUnion
+from app.models.credit_union import CreditUnion, CreditUnionMemberInvite
 from app.models.user import User
 from app.schemas.user import UserOut
 from app.schemas.auth import (
@@ -33,6 +33,52 @@ from app.schemas.auth import (
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+def _member_invite_and_cu(db: Session, token: str, registration_email: str):
+    """Validate an unused member invite; return (invite_row, credit_union). Raises HTTPException if invalid."""
+    inv = (
+        db.query(CreditUnionMemberInvite)
+        .filter(
+            CreditUnionMemberInvite.token == token,
+            CreditUnionMemberInvite.used_at.is_(None),
+        )
+        .first()
+    )
+    if not inv:
+        raise HTTPException(status_code=400, detail="Invalid or already used invitation link.")
+    cu = (
+        db.query(CreditUnion)
+        .filter(CreditUnion.id == inv.credit_union_id, CreditUnion.is_active == True)
+        .first()
+    )
+    if not cu:
+        raise HTTPException(status_code=400, detail="This invitation is no longer valid.")
+    want = (inv.invited_email or "").strip().lower()
+    if want and want != (registration_email or "").strip().lower():
+        raise HTTPException(
+            status_code=400,
+            detail="Use the email address this invitation was created for.",
+        )
+    return inv, cu
+
+
+def _credit_union_id_from_signup_payload(db: Session, data: RegisterRequest) -> int | None:
+    mit = (data.member_invite_token or "").strip()
+    if mit:
+        _, cu = _member_invite_and_cu(db, mit, str(data.email))
+        return cu.id
+    if data.cu_signup_token and data.cu_signup_token.strip():
+        cu = (
+            db.query(CreditUnion)
+            .filter(
+                CreditUnion.signup_token == data.cu_signup_token.strip(),
+                CreditUnion.is_active == True,
+            )
+            .first()
+        )
+        return cu.id if cu else None
+    return None
 
 
 def _to_channel(channel: str) -> OtpChannel:
@@ -101,18 +147,13 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
 
     password_hash = hash_password(data.password)
 
-    credit_union_id = None
-    if data.cu_signup_token and data.cu_signup_token.strip():
-        cu = (
-            db.query(CreditUnion)
-            .filter(
-                CreditUnion.signup_token == data.cu_signup_token.strip(),
-                CreditUnion.is_active == True,
-            )
-            .first()
-        )
-        if cu:
-            credit_union_id = cu.id
+    invite_row = None
+    mit = (data.member_invite_token or "").strip()
+    if mit:
+        invite_row, cu_inv = _member_invite_and_cu(db, mit, str(data.email))
+        credit_union_id = cu_inv.id
+    else:
+        credit_union_id = _credit_union_id_from_signup_payload(db, data)
 
     user = User(
         email=data.email,
@@ -125,6 +166,10 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
         is_phone_verified=bool(data.phone),
     )
     db.add(user)
+    db.flush()
+    if invite_row:
+        invite_row.used_at = datetime.utcnow()
+        invite_row.used_by_user_id = user.id
     db.commit()
     db.refresh(user)
 
@@ -144,14 +189,7 @@ def request_otp(data: RegisterRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=409, detail="User already registered. Please log in.")
 
     password_hash = hash_password(data.password)
-    credit_union_id = None
-    if data.cu_signup_token and data.cu_signup_token.strip():
-        cu = db.query(CreditUnion).filter(
-            CreditUnion.signup_token == data.cu_signup_token.strip(),
-            CreditUnion.is_active == True,
-        ).first()
-        if cu:
-            credit_union_id = cu.id
+    credit_union_id = _credit_union_id_from_signup_payload(db, data)
     if user:
         user.name = data.name
         user.phone = data.phone
@@ -241,7 +279,13 @@ def verify_otp(data: RegisterVerifyRequest, db: Session = Depends(get_db)):
         user.is_email_verified = True
     if channel == OtpChannel.sms:
         user.is_phone_verified = True
-    if data.cu_signup_token and data.cu_signup_token.strip():
+    mit = (data.member_invite_token or "").strip()
+    if mit:
+        inv, cu = _member_invite_and_cu(db, mit, str(data.email))
+        user.credit_union_id = cu.id
+        inv.used_at = datetime.utcnow()
+        inv.used_by_user_id = user.id
+    elif data.cu_signup_token and data.cu_signup_token.strip():
         cu = db.query(CreditUnion).filter(
             CreditUnion.signup_token == data.cu_signup_token.strip(),
             CreditUnion.is_active == True,

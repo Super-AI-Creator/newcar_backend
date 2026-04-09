@@ -42,6 +42,8 @@ def _send_via_resend(
         "subject": subject,
         "text": body,
     }
+    if html_body:
+        payload["html"] = html_body
     if attachments:
         payload["attachments"] = [
             {

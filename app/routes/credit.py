@@ -75,7 +75,7 @@ def apply_credit(
 ):
     scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
     raw = payload.payload_json if isinstance(payload.payload_json, dict) else {}
-    merged = enrich_payload_with_formatted(raw, mask_sensitive=True)
+    merged = enrich_payload_with_formatted(raw, mask_sensitive=False)
     app_row = CreditApplication(
         user_id=scoped_user_id,
         vin=payload.vin,
@@ -102,7 +102,7 @@ def apply_credit_public(payload: PublicCreditApplicationIn, db: Session = Depend
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You must agree to terms before submitting.")
 
     base = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
-    merged = enrich_payload_with_formatted(base, mask_sensitive=True)
+    merged = enrich_payload_with_formatted(base, mask_sensitive=False)
     app_row = CreditApplication(
         user_id=None,
         vin=payload.vin,
