@@ -9,6 +9,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -323,8 +324,22 @@ def admin_delete_credit_union(
     cu = db.query(CreditUnion).filter(CreditUnion.id == cu_id).first()
     if not cu:
         raise HTTPException(status_code=404, detail="Credit union not found.")
+    # Make deletion resilient across older schemas where FK ON DELETE rules may be missing.
+    db.query(User).filter(User.credit_union_id == cu_id).update({User.credit_union_id: None}, synchronize_session=False)
+    db.query(Deal).filter(Deal.credit_union_id == cu_id).update({Deal.credit_union_id: None}, synchronize_session=False)
+    db.query(CreditUnionLoanProgram).filter(CreditUnionLoanProgram.credit_union_id == cu_id).delete(synchronize_session=False)
+    db.query(CreditUnionDisclosure).filter(CreditUnionDisclosure.credit_union_id == cu_id).delete(synchronize_session=False)
+    db.query(CreditUnionMemberInvite).filter(CreditUnionMemberInvite.credit_union_id == cu_id).delete(synchronize_session=False)
+    db.query(CuMemberApproval).filter(CuMemberApproval.credit_union_id == cu_id).delete(synchronize_session=False)
     db.delete(cu)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Could not delete credit union because related records still reference it.",
+        )
     return {"deleted": True, "id": cu_id}
 
 
