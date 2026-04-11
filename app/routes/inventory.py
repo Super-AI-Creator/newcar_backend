@@ -18,7 +18,12 @@ from app.models.homepage_featured_vehicle import HomepageFeaturedVehicle
 from app.models.manual_vehicle import ManualVehicle
 from app.models.user import User
 from app.schemas.inventory import InventoryItem, InventorySearchResponse, OfferOverrideOut, ModelScoreOut
-from app.services.legacy_tables import build_inventory_count_query, build_inventory_query, serialize_photos
+from app.services.legacy_tables import (
+    build_inventory_count_query,
+    build_inventory_query,
+    is_feed_csv_listing,
+    serialize_photos,
+)
 from app.services.make_normalization import canonicalize_make
 from app.services.offers import apply_offer_visibility
 from app.services.payments import estimate_monthly_payment, resolve_price
@@ -666,7 +671,10 @@ def search_inventory(
                 mileage=mapping.get("mileage"),
                 condition=str(mapping.get("condition")).lower() if mapping.get("condition") else None,
                 details=_serialize_details(mapping.get("details")),
-                photos=serialize_photos(mapping.get("photos")),
+                photos=serialize_photos(
+                    mapping.get("photos"),
+                    max_photos=None if is_feed_csv_listing(mapping.get("carfax_url")) else 5,
+                ),
                 last_seen_at=str(mapping.get("last_seen_at")) if mapping.get("last_seen_at") else None,
                 dealer_name=mapping.get("dealer_name"),
                 dealer_phone=dealer_phone,
@@ -964,7 +972,12 @@ def homepage_specials(
                 mileage=effective_mileage,
                 condition=effective_condition,
                 details=_serialize_details(effective_details),
-                photos=_manual_vehicle_photos(effective_photos) if manual_override and manual_override.photos_json else serialize_photos(effective_photos),
+                photos=_manual_vehicle_photos(effective_photos)
+                if manual_override and manual_override.photos_json
+                else serialize_photos(
+                    effective_photos,
+                    max_photos=None if is_feed_csv_listing(effective_carfax_url) else 5,
+                ),
                 last_seen_at=str(mapping.get("last_seen_at")) if mapping.get("last_seen_at") else None,
                 dealer_name=effective_dealer_name,
                 dealer_phone=dealer_phone,
@@ -1162,7 +1175,12 @@ def get_inventory_item(
         mileage=effective_mileage,
         condition=effective_condition,
         details=_serialize_details(effective_details),
-        photos=_manual_vehicle_photos(effective_photos) if manual_override and manual_override.photos_json else serialize_photos(effective_photos),
+        photos=_manual_vehicle_photos(effective_photos)
+        if manual_override and manual_override.photos_json
+        else serialize_photos(
+            effective_photos,
+            max_photos=None if is_feed_csv_listing(effective_carfax_url) else 5,
+        ),
         last_seen_at=str(mapping.get("last_seen_at")) if mapping.get("last_seen_at") else None,
         dealer_name=effective_dealer_name,
         dealer_phone=dealer_phone,

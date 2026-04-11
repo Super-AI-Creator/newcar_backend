@@ -320,6 +320,35 @@ def _table_col(table, *candidates: str):
     return None
 
 
+def _mapping_col_value(mapping: dict, column) -> Optional[Any]:
+    if column is None:
+        return None
+    key = getattr(column, "key", None)
+    if not key:
+        return None
+    return mapping.get(key)
+
+
+def _serialize_general_status_cell(value: Any) -> Optional[Any]:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    return value
+
+
+def _truncate_display_text(value: Any, max_len: int = 56) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    return s if len(s) <= max_len else f"{s[: max_len - 1]}…"
+
+
 def _truthy_filter(column):
     if column is None:
         return true()
@@ -397,6 +426,7 @@ def general_status(
     dealer_name_col = _table_col(dealer_sources, "dealer_name", "name", "brand", "website_url")
     active_dealer_names: list[str] = []
     active_source_ids: list[int] = []
+    dealer_items: list[dict] = []
 
     if "id" in dealer_sources.c:
         active_source_ids = [
@@ -407,14 +437,58 @@ def general_status(
             if row and row[0] is not None
         ]
 
+    vehicle_type_src_col = _table_col(dealer_sources, "vehicle_type")
+    scrape_method_col = _table_col(dealer_sources, "scrape_method")
+    last_scrape_status_col = _table_col(dealer_sources, "last_scrape_status", "status", "source_status")
+    website_src_col = _table_col(dealer_sources, "website_url", "inventory_url")
+    updated_src_col = _table_col(dealer_sources, "updated_at", "last_success_at")
+    brand_src_col = _table_col(dealer_sources, "brand")
+
+    order_by_cols = []
     if dealer_name_col is not None:
-        name_rows = db.execute(
-            select(dealer_name_col)
-            .where(active_source_filter, dealer_name_col.is_not(None), func.trim(dealer_name_col) != "")
-            .distinct()
-            .order_by(dealer_name_col.asc())
-        ).fetchall()
-        active_dealer_names = [str(row[0]).strip() for row in name_rows if row and row[0]]
+        order_by_cols.append(dealer_name_col.asc())
+    elif "id" in dealer_sources.c:
+        order_by_cols.append(dealer_sources.c.id.asc())
+
+    active_sources_stmt = select(dealer_sources).where(active_source_filter)
+    if order_by_cols:
+        active_sources_stmt = active_sources_stmt.order_by(*order_by_cols)
+    active_source_rows = db.execute(active_sources_stmt).fetchall()
+
+    for row in active_source_rows:
+        m = dict(row._mapping)
+        sid = m.get("id")
+        sid_int: Optional[int] = None
+        if sid is not None:
+            try:
+                sid_int = int(sid)
+            except (TypeError, ValueError):
+                sid_int = None
+
+        name = ""
+        if dealer_name_col is not None:
+            nv = _mapping_col_value(m, dealer_name_col)
+            if nv is not None:
+                name = str(nv).strip()
+        if not name and brand_src_col is not None:
+            bv = _mapping_col_value(m, brand_src_col)
+            if bv is not None:
+                name = str(bv).strip()
+
+        dealer_items.append(
+            {
+                "id": sid_int if sid_int is not None else sid,
+                "name": name or None,
+                "brand": _serialize_general_status_cell(_mapping_col_value(m, brand_src_col)),
+                "vehicle_type": _serialize_general_status_cell(_mapping_col_value(m, vehicle_type_src_col)),
+                "scrape_method": _serialize_general_status_cell(_mapping_col_value(m, scrape_method_col)),
+                "last_scrape_status": _serialize_general_status_cell(_mapping_col_value(m, last_scrape_status_col)),
+                "website_url": _truncate_display_text(_mapping_col_value(m, website_src_col), 64),
+                "updated_at": _serialize_general_status_cell(_mapping_col_value(m, updated_src_col)),
+            }
+        )
+
+    active_dealer_names = sorted({str(d["name"]).strip() for d in dealer_items if d.get("name")})
 
     listing_filters = [_active_listing_filter(listings)]
     if "vin" in listings.c:
@@ -462,8 +536,9 @@ def general_status(
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "dealers": {
-            "active_count": len(active_dealer_names),
+            "active_count": len(dealer_items),
             "names": active_dealer_names,
+            "items": dealer_items,
         },
         "vehicles": {
             "active_new_count": int(vehicle_counts["new"]),

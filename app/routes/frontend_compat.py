@@ -23,7 +23,13 @@ from app.services.broker_message_webhook import (
     run_broker_customer_message_webhook_task,
 )
 from app.services.broker_routing import select_next_broker_admin_user_id
-from app.services.legacy_tables import build_inventory_count_query, build_inventory_query, load_legacy_tables, serialize_photos
+from app.services.legacy_tables import (
+    build_inventory_count_query,
+    build_inventory_query,
+    is_feed_csv_listing,
+    load_legacy_tables,
+    serialize_photos,
+)
 
 router = APIRouter(tags=["frontend-compat"])
 logger = logging.getLogger(__name__)
@@ -247,7 +253,10 @@ def dealer_inventory(
             "listed_price": _to_float(m.get("listed_price")),
             "mileage": m.get("mileage"),
             "condition": str(m.get("condition")).lower() if m.get("condition") else None,
-            "photos": serialize_photos(m.get("photos")),
+            "photos": serialize_photos(
+                m.get("photos"),
+                max_photos=None if is_feed_csv_listing(m.get("carfax_url")) else 5,
+            ),
             "last_seen_at": str(m.get("last_seen_at")) if m.get("last_seen_at") else None,
             "down": _to_float(offer.down_payment) if offer else None,
             "monthly": _to_float(offer.monthly_payment) if offer else None,

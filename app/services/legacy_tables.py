@@ -274,16 +274,23 @@ def build_inventory_count_query(engine: Engine, filters: Dict[str, Any]):
     )
 
 
-def serialize_photos(raw: Any) -> List[str]:
+def is_feed_csv_listing(carfax_url: Any) -> bool:
+    """Feed-sourced rows use this sentinel; they may carry many more photo URLs than scraped listings."""
+    return str(carfax_url or "").strip().lower() == "feed_csv"
+
+
+def serialize_photos(raw: Any, *, max_photos: Optional[int] = 5) -> List[str]:
+    """Normalize photo list. Scraped listings are capped (default 5); pass max_photos=None for full feed lists."""
     if not raw:
         return []
     if isinstance(raw, list):
-        return raw[:5]
+        out = list(raw)
+        return out if max_photos is None else out[: max(0, int(max_photos))]
     if isinstance(raw, str):
         try:
             data = json.loads(raw)
             if isinstance(data, list):
-                return data[:5]
+                return data if max_photos is None else data[: max(0, int(max_photos))]
         except json.JSONDecodeError:
             return [raw]
     return []

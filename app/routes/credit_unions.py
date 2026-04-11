@@ -58,7 +58,6 @@ class CreditUnionCreate(BaseModel):
     name: str
     slug: Optional[str] = None
     logo_url: Optional[str] = None
-    banner_url: Optional[str] = None
     hero_title: Optional[str] = None
     hero_subtitle: Optional[str] = None
     phone: Optional[str] = None
@@ -90,7 +89,6 @@ class CreditUnionUpdate(BaseModel):
     name: Optional[str] = None
     slug: Optional[str] = None
     logo_url: Optional[str] = None
-    banner_url: Optional[str] = None
     hero_title: Optional[str] = None
     hero_subtitle: Optional[str] = None
     phone: Optional[str] = None
@@ -185,7 +183,7 @@ def admin_create_credit_union(
         name=payload.name.strip(),
         slug=slug,
         logo_url=(payload.logo_url or "").strip() or None,
-        banner_url=(payload.banner_url or "").strip() or None,
+        banner_url=None,
         hero_title=(payload.hero_title or "").strip() or None,
         hero_subtitle=(payload.hero_subtitle or "").strip() or None,
         phone=(payload.phone or "").strip() or None,
@@ -276,8 +274,7 @@ def admin_update_credit_union(
         cu.slug = slug
     if payload.logo_url is not None:
         cu.logo_url = (payload.logo_url or "").strip() or None
-    if payload.banner_url is not None:
-        cu.banner_url = (payload.banner_url or "").strip() or None
+    cu.banner_url = None
     if payload.hero_title is not None:
         cu.hero_title = (payload.hero_title or "").strip() or None
     if payload.hero_subtitle is not None:
@@ -324,21 +321,45 @@ def admin_delete_credit_union(
     cu = db.query(CreditUnion).filter(CreditUnion.id == cu_id).first()
     if not cu:
         raise HTTPException(status_code=404, detail="Credit union not found.")
+    # Capture CU staff before clearing credit_union_id (role cleanup avoids orphaned credit_union users).
+    cu_staff_ids = [
+        row[0]
+        for row in db.query(User.id).filter(User.credit_union_id == cu_id, User.role == UserRole.credit_union).all()
+    ]
     # Make deletion resilient across older schemas where FK ON DELETE rules may be missing.
     db.query(User).filter(User.credit_union_id == cu_id).update({User.credit_union_id: None}, synchronize_session=False)
+    if cu_staff_ids:
+        db.query(User).filter(User.id.in_(cu_staff_ids)).update({User.role: UserRole.customer}, synchronize_session=False)
     db.query(Deal).filter(Deal.credit_union_id == cu_id).update({Deal.credit_union_id: None}, synchronize_session=False)
+    # Deals may still point at approvals for this CU; clear before deleting approvals.
+    approval_id_rows = [
+        row[0]
+        for row in db.query(CuMemberApproval.id).filter(CuMemberApproval.credit_union_id == cu_id).all()
+    ]
+    if approval_id_rows:
+        db.query(Deal).filter(Deal.cu_approval_id.in_(approval_id_rows)).update(
+            {Deal.cu_approval_id: None}, synchronize_session=False
+        )
     db.query(CreditUnionLoanProgram).filter(CreditUnionLoanProgram.credit_union_id == cu_id).delete(synchronize_session=False)
     db.query(CreditUnionDisclosure).filter(CreditUnionDisclosure.credit_union_id == cu_id).delete(synchronize_session=False)
     db.query(CreditUnionMemberInvite).filter(CreditUnionMemberInvite.credit_union_id == cu_id).delete(synchronize_session=False)
     db.query(CuMemberApproval).filter(CuMemberApproval.credit_union_id == cu_id).delete(synchronize_session=False)
-    db.delete(cu)
+    db.flush()
+    # Bulk delete avoids ORM identity-map edge cases after heavy FK cleanup.
+    removed = db.query(CreditUnion).filter(CreditUnion.id == cu_id).delete(synchronize_session=False)
+    if removed != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Credit union could not be deleted (row missing or blocked).")
     try:
         db.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         db.rollback()
+        hint = ""
+        if getattr(e, "orig", None) is not None and getattr(e.orig, "args", None):
+            hint = f" ({e.orig.args[0]})" if e.orig.args else ""
         raise HTTPException(
             status_code=409,
-            detail="Could not delete credit union because related records still reference it.",
+            detail=f"Could not delete credit union because related records still reference it.{hint}",
         )
     return {"deleted": True, "id": cu_id}
 
