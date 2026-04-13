@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.email import EmailDeliveryError, send_email
 from app.core.deps import get_current_user, get_db, require_role
+from app.core.security import hash_password
 from app.models.broker_message import BrokerMessage
 from app.models.credit_union import (
     CreditUnion,
@@ -227,6 +228,10 @@ def admin_get_credit_union(
 
 class AssignStaffBody(BaseModel):
     email: str
+    """Display name — required only when creating a new user (email not yet registered)."""
+    name: Optional[str] = None
+    """Temporary password — required only when creating a new user (min 8 characters)."""
+    password: Optional[str] = None
 
 
 @router.post("/admin/credit-unions/{cu_id}/assign-staff")
@@ -244,12 +249,54 @@ def admin_assign_credit_union_staff(
     if not email:
         raise HTTPException(status_code=400, detail="Email is required.")
     target = db.query(User).filter(User.email == email).first()
-    if not target:
-        raise HTTPException(status_code=404, detail=f"No user found with email {email}. They must register first.")
-    target.role = UserRole.credit_union
-    target.credit_union_id = cu_id
-    db.commit()
-    return {"ok": True, "message": f"{email} is now Credit Union staff for {cu.name}. They can log in and use the CU dashboard."}
+    if target:
+        if target.role == UserRole.super_admin:
+            raise HTTPException(
+                status_code=400,
+                detail="That account is a platform super admin and cannot be switched to credit union staff.",
+            )
+        target.role = UserRole.credit_union
+        target.credit_union_id = cu_id
+        db.commit()
+        return {
+            "ok": True,
+            "message": f"{email} is now Credit Union staff for {cu.name}. They can log in at /login and open the CU dashboard.",
+        }
+
+    pwd = (payload.password or "").strip()
+    name = (payload.name or "").strip()
+    if len(pwd) < 8:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No account exists with that email yet. Either have them register at /register first, "
+                "or enter Display name + Temporary password (8+ characters) below to create their staff login now."
+            ),
+        )
+    if not name:
+        raise HTTPException(status_code=400, detail="Display name is required when creating a new staff user.")
+
+    row = User(
+        email=email,
+        name=name,
+        role=UserRole.credit_union,
+        password_hash=hash_password(pwd),
+        credit_union_id=cu_id,
+        phone=None,
+        is_email_verified=True,
+        is_phone_verified=False,
+    )
+    db.add(row)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Could not create user (email may already be in use).") from None
+    db.refresh(row)
+    return {
+        "ok": True,
+        "message": f"Created staff login for {email} on {cu.name}. They can sign in at /login and should change their password after first login.",
+    }
 
 
 @router.put("/admin/credit-unions/{cu_id}")
