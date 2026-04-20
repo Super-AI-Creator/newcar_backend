@@ -359,6 +359,7 @@ def admin_update_credit_union(
 
 
 @router.delete("/admin/credit-unions/{cu_id}")
+@router.post("/admin/credit-unions/{cu_id}/delete")
 def admin_delete_credit_union(
     cu_id: int,
     db: Session = Depends(get_db),
@@ -653,6 +654,7 @@ class ApprovalCreate(BaseModel):
     interest_rate: float
     special_notes: Optional[str] = None
     approval_code: Optional[str] = None
+    member_name: Optional[str] = None
     member_phone: Optional[str] = None
     member_email: Optional[str] = None
 
@@ -709,6 +711,7 @@ def _serialize_approval(a: CuMemberApproval, include_cu_name: bool = False) -> d
         "interest_rate": float(a.interest_rate) if a.interest_rate is not None else None,
         "special_notes": a.special_notes,
         "approval_code": a.approval_code,
+        "member_name": a.member_name,
         "member_phone": a.member_phone,
         "member_email": a.member_email,
         "status": a.status,
@@ -762,6 +765,7 @@ def create_approval(
         interest_rate=Decimal(str(payload.interest_rate)),
         special_notes=(payload.special_notes or "").strip() or None,
         approval_code=code,
+        member_name=(payload.member_name or "").strip() or None,
         member_phone=(payload.member_phone or "").strip() or None,
         member_email=(payload.member_email or "").strip() or None,
         status="pending",
@@ -779,9 +783,11 @@ def create_approval(
         sms_sent = send_sms(approval.member_phone, body)
     if approval.member_email:
         subject = f"{cu.name}: Your auto loan pre-approval is ready"
+        greet = (approval.member_name or "").strip()
+        salutation = f"Hello {greet},\n\n" if greet else "Hello,\n\n"
         body = (
-            f"Hello,\n\n"
-            f"You have been pre-approved for an auto loan with {cu.name}.\n\n"
+            salutation
+            + f"You have been pre-approved for an auto loan with {cu.name}.\n\n"
             f"Approval amount: ${float(approval.loan_amount):,.2f}\n"
             f"Term: {approval.term_months} months\n"
             f"Rate: {float(approval.interest_rate):.2f}% APR\n"

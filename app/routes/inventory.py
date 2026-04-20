@@ -346,6 +346,16 @@ def _manual_vehicle_photos(raw: Optional[str]) -> list[str]:
     return []
 
 
+def _clean_filter_text(value: Optional[str]) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _model_matches_make(make_value: str, model_value: str) -> bool:
+    return make_value.strip().lower() == model_value.strip().lower()
+
+
 def _manual_vehicle_matches(
     row: ManualVehicle,
     *,
@@ -434,9 +444,11 @@ def inventory_filters(
             )
             if not offer_out:
                 continue
-        make_key = canonicalize_make(str(make_value)) if make_value is not None else None
-        model_key = str(model_value).strip() if model_value is not None else ""
-        if not make_key or not model_key:
+        raw_make = _clean_filter_text(make_value)
+        raw_model = _clean_filter_text(model_value)
+        make_key = canonicalize_make(raw_make) if raw_make else None
+        model_key = raw_model
+        if not make_key or not model_key or _model_matches_make(make_key, model_key):
             continue
         makes_set.add(make_key)
         models_by_make.setdefault(make_key, set()).add(model_key)
@@ -460,13 +472,13 @@ def inventory_filters(
             )
             if not apply_offer_visibility(offer, row_vehicle_type, require_monthly_payment=True):
                 continue
-        make_value = (row.make or "").strip()
-        model_value = (row.model or "").strip()
+        make_value = _clean_filter_text(row.make)
+        model_value = _clean_filter_text(row.model)
         trim_value = (row.trim or "").strip()
         if not make_value or not model_value:
             continue
         make_key = canonicalize_make(make_value)
-        if not make_key:
+        if not make_key or _model_matches_make(make_key, model_value):
             continue
         makes_set.add(make_key)
         models_by_make.setdefault(make_key, set()).add(model_value)

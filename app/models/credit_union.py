@@ -82,6 +82,7 @@ class CuMemberApproval(Base):
     interest_rate = Column(Numeric(6, 3), nullable=True)
     special_notes = Column(Text, nullable=True)
     approval_code = Column(String(64), unique=True, nullable=False, index=True)
+    member_name = Column(String(255), nullable=True)
     member_phone = Column(String(50), nullable=True)
     member_email = Column(String(255), nullable=True)
     status = Column(String(20), nullable=False, default="pending")
