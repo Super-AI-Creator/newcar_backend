@@ -20,6 +20,8 @@ class CreditUnion(Base):
     banner_url = Column(String(500), nullable=True)
     hero_title = Column(String(255), nullable=True)
     hero_subtitle = Column(Text, nullable=True)
+    testimonial_image_url = Column(String(500), nullable=True)
+    testimonial_text = Column(Text, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())

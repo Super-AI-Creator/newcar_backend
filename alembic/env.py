@@ -1,5 +1,6 @@
 from logging.config import fileConfig
 from pathlib import Path
+import os
 import sys
 
 from sqlalchemy import engine_from_config, pool
@@ -9,6 +10,16 @@ from alembic import context
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+# Load manage_backend/.env before Settings() runs (Pydantic's env_file is cwd-relative).
+# override=True: if the shell still has MYSQL_* from an old session, values from .env win
+# (common cause of 1045 after editing .env on Windows).
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(PROJECT_ROOT / ".env", override=True)
+except ImportError:
+    pass
 
 from app.core.database import get_database_url
 from app.models import Base
@@ -20,6 +31,10 @@ if config.config_file_name is not None:
 
 
 def get_url():
+    # Optional: full SQLAlchemy URL for migrations only (e.g. paste from MySQL Workbench).
+    override = (os.environ.get("MIGRATION_DATABASE_URL") or "").strip()
+    if override:
+        return override
     return get_database_url()
 
 
