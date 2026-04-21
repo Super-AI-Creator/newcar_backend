@@ -161,9 +161,12 @@ def build_inventory_query(engine: Engine, filters: Dict[str, Any]):
     if vehicle_type_col is not None:
         vehicle_type_col = vehicle_type_col.label("vehicle_type")
     year_col = _coalesce(_column_or_none(canonical, "year"), _column_or_none(best_listing, "year"), "year")
-    make_col = _coalesce(_column_or_none(canonical, "make"), _column_or_none(best_listing, "make"), "make")
-    model_col = _coalesce(_column_or_none(canonical, "model"), _column_or_none(best_listing, "model"), "model")
-    trim_col = _coalesce(_column_or_none(canonical, "trim"), _column_or_none(best_listing, "trim"), "trim")
+    # Prefer live listing YMM over canonical: canonical rows can be stale or mis-joined,
+    # which previously produced wrong titles (e.g. filter make matching canonical while
+    # photos/VIN reflect the listing vehicle).
+    make_col = _coalesce(_column_or_none(best_listing, "make"), _column_or_none(canonical, "make"), "make")
+    model_col = _coalesce(_column_or_none(best_listing, "model"), _column_or_none(canonical, "model"), "model")
+    trim_col = _coalesce(_column_or_none(best_listing, "trim"), _column_or_none(canonical, "trim"), "trim")
     msrp_col = _coalesce(_column_or_none(canonical, "msrp"), _column_or_none(best_listing, "msrp"), "msrp")
     listed_price_col = _column_or_none(best_listing, "listed_price")
     mileage_col = _column_or_none(best_listing, "mileage")
