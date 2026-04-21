@@ -33,7 +33,9 @@ _cors_origins = [
     "http://power-auto-buying-nextjs.vercel.app",
     "https://power-auto-buying-nextjs.vercel.app",
     "https://www.carscu.com",
-    "http://www.carscu.com"
+    "http://www.carscu.com",
+    "https://carscu.com",
+    "http://carscu.com"
 ]
 _extra = os.getenv("CORS_ORIGINS", "").strip()
 if _extra:

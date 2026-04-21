@@ -86,8 +86,8 @@ class Settings(BaseSettings):
     # Optional comma-separated list of extra origins for the standalone CU API.
     # Parsed by credit_union_platform/backend/main.py.
     cu_cors_origins: Optional[str] = Field(None)
-    # When set, CU approval letter / SMS claim links and white-label portal URLs use this base
-    # (standalone credit union web app) instead of frontend_base_url.
+    # When set, CU white-label portal and approval *claim* links prefer this base over frontend_base_url.
+    # Member *signup* (join) links after pre-approval use frontend_base_url first, then this as fallback.
     cu_portal_base_url: Optional[str] = Field(None)
     # Marketing demo form on CU landing: notify this address (default chris@carscu.com).
     cu_demo_contact_notify_email: str = Field("chris@carscu.com")

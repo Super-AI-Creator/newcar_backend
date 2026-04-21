@@ -149,6 +149,11 @@ def _portal_base_url() -> str:
     return (settings.cu_portal_base_url or settings.frontend_base_url or "").rstrip("/")
 
 
+def _platform_member_site_base_url() -> str:
+    """Main consumer site (e.g. join/register). Prefer over CU portal for member signup links."""
+    return (settings.frontend_base_url or settings.cu_portal_base_url or "").rstrip("/")
+
+
 # ---------- Admin: Credit Unions (super_admin) ----------
 @router.get("/admin/credit-unions")
 def admin_list_credit_unions(
@@ -562,6 +567,7 @@ def remind_credit_union_member_onboarding(
     )
 
     base = _portal_base_url()
+    signup_base = _platform_member_site_base_url()
     email_sent = False
     sms_sent = False
     to_email = (member.email or "").strip()
@@ -570,8 +576,8 @@ def remind_credit_union_member_onboarding(
     if approval:
         claim_url = f"{base}/approvals/{approval.approval_code}" if base else f"/approvals/{approval.approval_code}"
         tok = (cu.signup_token or "").strip()
-        if tok and base:
-            join_url = f"{base}/creditunions/join?token={tok}&approval={approval.approval_code}"
+        if tok and signup_base:
+            join_url = f"{signup_base}/creditunions/join?token={tok}&approval={approval.approval_code}"
         elif tok:
             join_url = f"/creditunions/join?token={tok}&approval={approval.approval_code}"
         else:
@@ -897,9 +903,18 @@ def create_approval(
     db.add(approval)
     db.commit()
     db.refresh(approval)
-    base = (settings.cu_portal_base_url or settings.frontend_base_url or "").rstrip("/")
-    claim_url = f"{base}/approvals/{approval.approval_code}"
-    join_url = f"{base}/creditunions/join?token={cu.signup_token}&approval={approval.approval_code}"
+    portal_base = _portal_base_url()
+    platform_base = _platform_member_site_base_url()
+    claim_url = (
+        f"{portal_base}/approvals/{approval.approval_code}"
+        if portal_base
+        else f"/approvals/{approval.approval_code}"
+    )
+    join_url = (
+        f"{platform_base}/creditunions/join?token={cu.signup_token}&approval={approval.approval_code}"
+        if platform_base
+        else f"/creditunions/join?token={cu.signup_token}&approval={approval.approval_code}"
+    )
     sms_sent = False
     email_sent = False
     if approval.member_phone:
