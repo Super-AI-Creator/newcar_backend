@@ -1,5 +1,6 @@
+from typing import Literal, Optional
+
 from pydantic import BaseModel
-from typing import Optional
 
 
 class FavoriteOut(BaseModel):
@@ -10,6 +11,8 @@ class FavoriteOut(BaseModel):
 class BrokerMessageIn(BaseModel):
     vin: Optional[str] = None
     message_text: str
+    # Where the member message appears: both threads, CU-only, or dealer-only (stored prefix differs).
+    audience: Literal["both", "cu", "broker"] = "both"
 
 
 class BrokerReplyIn(BaseModel):

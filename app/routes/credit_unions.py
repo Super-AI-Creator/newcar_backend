@@ -513,6 +513,118 @@ def list_my_credit_union_members(
     return {"items": out}
 
 
+@router.post("/credit-unions/mine/members/{member_user_id}/remind-onboarding")
+def remind_credit_union_member_onboarding(
+    member_user_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """CU staff: resend portal / approval links by email and SMS (same delivery as approval creation, no GHL)."""
+    role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if role != "credit_union":
+        raise HTTPException(status_code=403, detail="Credit union staff only.")
+    cu_id = getattr(user, "credit_union_id", None)
+    if not cu_id:
+        raise HTTPException(status_code=403, detail="No credit union assigned to this account.")
+    cu = db.query(CreditUnion).filter(CreditUnion.id == int(cu_id)).first()
+    if not cu:
+        raise HTTPException(status_code=404, detail="Credit union not found.")
+
+    member = db.query(User).filter(User.id == int(member_user_id)).first()
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found.")
+    member_role = member.role.value if hasattr(member.role, "value") else str(member.role)
+    if member_role != "customer":
+        raise HTTPException(status_code=400, detail="Target user is not a member account.")
+    if int(member.credit_union_id or 0) != int(cu_id):
+        raise HTTPException(status_code=403, detail="This member is not assigned to your credit union.")
+
+    approval = (
+        db.query(CuMemberApproval)
+        .filter(
+            CuMemberApproval.credit_union_id == int(cu_id),
+            CuMemberApproval.user_id == int(member_user_id),
+        )
+        .order_by(CuMemberApproval.created_at.desc())
+        .first()
+    )
+
+    base = _portal_base_url()
+    email_sent = False
+    sms_sent = False
+    to_email = (member.email or "").strip()
+    phone = ((approval.member_phone if approval else None) or member.phone or "").strip()
+
+    if approval:
+        claim_url = f"{base}/approvals/{approval.approval_code}" if base else f"/approvals/{approval.approval_code}"
+        tok = (cu.signup_token or "").strip()
+        if tok and base:
+            join_url = f"{base}/creditunions/join?token={tok}&approval={approval.approval_code}"
+        elif tok:
+            join_url = f"/creditunions/join?token={tok}&approval={approval.approval_code}"
+        else:
+            join_url = f"{base}/login" if base else "/login"
+
+        if to_email:
+            subject = f"{cu.name}: Reminder — your member portal & pre-approval"
+            greet = (member.name or "").strip()
+            salutation = f"Hello {greet},\n\n" if greet else "Hello,\n\n"
+            body = (
+                salutation
+                + f"This is a reminder from {cu.name} regarding your auto loan pre-approval.\n\n"
+                f"Approval amount: ${float(approval.loan_amount):,.2f}\n"
+                f"Term: {approval.term_months} months\n"
+                f"Rate: {float(approval.interest_rate or 0):.2f}% APR\n"
+                f"Reference code: {approval.approval_code}\n\n"
+                f"Open your approval letter:\n{claim_url}\n\n"
+                f"Member portal (create account or sign in):\n{join_url}\n\n"
+                f"If you have questions, contact your credit union.\n"
+            )
+            try:
+                send_email(to_email=to_email, subject=subject, body=body)
+                email_sent = True
+            except EmailDeliveryError:
+                email_sent = False
+
+        if phone:
+            sms_body = f"{cu.name}: Pre-approval reminder. View letter: {claim_url} Portal: {join_url}"
+            sms_sent = send_sms(phone, sms_body[:480])
+    else:
+        login_url = f"{base}/login" if base else "/login"
+        if to_email:
+            subject = f"{cu.name}: Reminder — sign in to your member portal"
+            greet = (member.name or "").strip()
+            salutation = f"Hello {greet},\n\n" if greet else "Hello,\n\n"
+            body = (
+                salutation
+                + f"Please sign in to your {cu.name} member portal using the link below.\n\n"
+                f"{login_url}\n\n"
+                f"If you need help, contact your credit union.\n"
+            )
+            try:
+                send_email(to_email=to_email, subject=subject, body=body)
+                email_sent = True
+            except EmailDeliveryError:
+                email_sent = False
+        if phone:
+            sms_body = f"{cu.name}: Member portal reminder. Sign in: {login_url}"
+            sms_sent = send_sms(phone, sms_body[:480])
+
+    if not email_sent and not sms_sent:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not send reminder: member has no email on file and no phone number.",
+        )
+
+    return {
+        "ok": True,
+        "member_user_id": int(member_user_id),
+        "email_sent": email_sent,
+        "sms_sent": sms_sent,
+        "had_approval": approval is not None,
+    }
+
+
 @router.get("/credit-unions/mine/members/activity-summary")
 def list_my_credit_union_member_activity_summary(
     limit: int = Query(2000, ge=1, le=5000),

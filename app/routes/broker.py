@@ -9,7 +9,13 @@ from app.models.broker_message import BrokerMessage
 from app.models.credit_union import CuMemberApproval
 from app.models.user import User
 from app.schemas.misc import BrokerMessageIn, BrokerReplyIn
-from app.services.broker_messages import encode_message_for_storage, parse_message_from_storage
+from app.services.broker_messages import (
+    encode_message_for_storage,
+    map_member_audience_to_sender_type,
+    parse_message_from_storage,
+    should_run_broker_customer_webhook,
+    should_sync_customer_message_to_ghl,
+)
 from app.services.ghl_deal_room import sync_deal_room_customer_message_to_ghl
 from app.services.broker_message_webhook import (
     is_broker_message_webhook_enabled,
@@ -32,10 +38,11 @@ def send_message(
 ):
     scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
     assigned_broker_user_id = select_next_broker_admin_user_id(db)
+    member_sender = map_member_audience_to_sender_type(payload.audience)
     msg = BrokerMessage(
         user_id=scoped_user_id,
         vin=payload.vin,
-        message_text=encode_message_for_storage(payload.message_text, sender_type="customer"),
+        message_text=encode_message_for_storage(payload.message_text, sender_type=member_sender),
         broker_admin_user_id=assigned_broker_user_id,
     )
     db.add(msg)
@@ -46,12 +53,13 @@ def send_message(
         target_user = db.query(User).filter(User.id == int(scoped_user_id)).first()
         if target_user is not None:
             message_user = target_user
+    sender_type, body = parse_message_from_storage(msg.message_text or "")
     try:
-        _, body = parse_message_from_storage(msg.message_text or "")
-        sync_deal_room_customer_message_to_ghl(user=message_user, message_text=body, vin=msg.vin)
+        if should_sync_customer_message_to_ghl(sender_type):
+            sync_deal_room_customer_message_to_ghl(user=message_user, message_text=body, vin=msg.vin)
     except Exception:
         logger.exception("GHL deal room sync failed after save message_id=%s", msg.id)
-    if is_broker_message_webhook_enabled():
+    if is_broker_message_webhook_enabled() and should_run_broker_customer_webhook(sender_type):
         background_tasks.add_task(run_broker_customer_message_webhook_task, int(msg.id))
     return {"status": "sent", "broker_admin_user_id": assigned_broker_user_id}
 

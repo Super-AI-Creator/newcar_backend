@@ -16,7 +16,13 @@ from app.services.credit_application_format import enrich_payload_with_formatted
 from app.models.offer_override import OfferOverride
 from app.models.user import User
 from app.services.cu_member_scope import resolve_member_scope_user_id
-from app.services.broker_messages import encode_message_for_storage, parse_message_from_storage
+from app.services.broker_messages import (
+    encode_message_for_storage,
+    map_member_audience_to_sender_type,
+    parse_message_from_storage,
+    should_run_broker_customer_webhook,
+    should_sync_customer_message_to_ghl,
+)
 from app.services.ghl_deal_room import sync_deal_room_customer_message_to_ghl
 from app.services.broker_message_webhook import (
     is_broker_message_webhook_enabled,
@@ -100,7 +106,7 @@ def list_messages(
         sender_type, body = parse_message_from_storage(row.message_text)
         broker_user = broker_map.get(int(row.broker_admin_user_id)) if row.broker_admin_user_id is not None else None
         customer_user = customer_map.get(int(row.user_id)) if row.user_id is not None else None
-        if sender_type == "customer":
+        if sender_type in ("customer", "customer_cu", "customer_broker"):
             is_member_viewing_self = (
                 role_value == "customer"
                 and member_user_id is None
@@ -156,6 +162,9 @@ def send_message_compat(
 
     vin = (payload or {}).get("vin")
     member_user_id = (payload or {}).get("member_user_id")
+    raw_audience = (payload or {}).get("audience")
+    audience = raw_audience if isinstance(raw_audience, str) else "both"
+    member_sender = map_member_audience_to_sender_type(audience)
     scoped_user_id = resolve_member_scope_user_id(
         db,
         user,
@@ -165,18 +174,19 @@ def send_message_compat(
     msg = BrokerMessage(
         user_id=scoped_user_id,
         vin=vin,
-        message_text=encode_message_for_storage(message_text, sender_type="customer"),
+        message_text=encode_message_for_storage(message_text, sender_type=member_sender),
         broker_admin_user_id=assigned_broker_user_id,
     )
     db.add(msg)
     db.commit()
     db.refresh(msg)
+    sender_type, body = parse_message_from_storage(msg.message_text or "")
     try:
-        _, body = parse_message_from_storage(msg.message_text or "")
-        sync_deal_room_customer_message_to_ghl(user=user, message_text=body, vin=vin)
+        if should_sync_customer_message_to_ghl(sender_type):
+            sync_deal_room_customer_message_to_ghl(user=user, message_text=body, vin=vin)
     except Exception:
         logger.exception("GHL deal room sync failed after save message_id=%s", msg.id)
-    if is_broker_message_webhook_enabled():
+    if is_broker_message_webhook_enabled() and should_run_broker_customer_webhook(sender_type):
         background_tasks.add_task(run_broker_customer_message_webhook_task, int(msg.id))
     return {"sent": True, "broker_admin_user_id": assigned_broker_user_id}
 
