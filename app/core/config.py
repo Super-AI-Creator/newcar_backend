@@ -95,6 +95,13 @@ class Settings(BaseSettings):
     cu_demo_contact_rate_limit_per_minute: int = Field(8, ge=1, le=120)
     # When set, member/broker deal-room messages assign to this broker_admin user only (e.g. Power Auto Buying).
     broker_single_assign_email: Optional[str] = Field(None)
+    # Optional shared response cache (Upstash Redis REST-compatible).
+    cache_rest_url: Optional[str] = Field(None)
+    cache_rest_token: Optional[str] = Field(None)
+    cache_default_ttl_seconds: int = Field(600, ge=30, le=86400)
+    # Warm critical inventory caches on backend startup (search + lease-specials first paint).
+    inventory_startup_warmup_enabled: bool = Field(True)
+    inventory_startup_warmup_delay_seconds: int = Field(2, ge=0, le=300)
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -27,6 +29,7 @@ from app.services.legacy_tables import (
 from app.services.make_normalization import canonicalize_make
 from app.services.offers import apply_offer_visibility
 from app.services.payments import estimate_monthly_payment, resolve_price
+from app.services.response_cache import get_shared_json, set_shared_json
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 _SEARCH_CACHE: dict[str, tuple[float, dict]] = {}
@@ -39,6 +42,17 @@ _MONTH_KEY_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _MAX_HOMEPAGE_FEATURED_VEHICLES = 6
 _HOMEPAGE_SPECIALS_CACHE: dict[str, tuple[float, dict]] = {}
 _HOMEPAGE_SPECIALS_CACHE_TTL_SECONDS = 60.0
+_EDGE_CACHE_HEADER_VALUE = "public, s-maxage=600, stale-while-revalidate=3600"
+_SHARED_CACHE_TTL_SECONDS = 600
+_SEARCH_SHARED_CACHE_NAMESPACE = "inventory-search"
+_FILTERS_SHARED_CACHE_NAMESPACE = "inventory-filters"
+_HOMEPAGE_SPECIALS_SHARED_CACHE_NAMESPACE = "inventory-homepage-specials"
+_HOT_SEARCH_CACHE_DIR = Path(__file__).resolve().parents[2] / ".cache" / "inventory-search"
+_HOT_SEARCH_CACHE_TTL_SECONDS = 60 * 30
+
+
+def _set_edge_cache_headers(response: Response) -> None:
+    response.headers["Cache-Control"] = _EDGE_CACHE_HEADER_VALUE
 
 
 def _serialize_details(raw):
@@ -267,6 +281,36 @@ def _cache_set(key: str, payload: dict):
             _SEARCH_CACHE.pop(oldest_key, None)
 
 
+def _hot_cache_file_for_key(key: str) -> Path:
+    digest = re.sub(r"[^a-f0-9]", "", hashlib.sha256(key.encode("utf-8")).hexdigest())
+    return _HOT_SEARCH_CACHE_DIR / f"{digest}.json"
+
+
+def _hot_cache_get(key: str):
+    path = _hot_cache_file_for_key(key)
+    try:
+        if not path.exists():
+            return None
+        age_seconds = time.time() - path.stat().st_mtime
+        if age_seconds > _HOT_SEARCH_CACHE_TTL_SECONDS:
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        return None
+    return None
+
+
+def _hot_cache_set(key: str, payload: dict) -> None:
+    path = _hot_cache_file_for_key(key)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        return
+
+
 def _filters_cache_get(key: str):
     now = time.time()
     cached = _FILTERS_CACHE.get(key)
@@ -394,12 +438,19 @@ def _manual_vehicle_matches(
 def inventory_filters(
     vehicle_type: str = Query("all", pattern="^(new|used|all)$"),
     offers_only: bool = Query(False),
+    response: Response = None,
     db: Session = Depends(get_db),
 ):
+    if response is not None:
+        _set_edge_cache_headers(response)
     cache_key = f"vehicle_type={vehicle_type}|offers_only={offers_only}"
     cached = _filters_cache_get(cache_key)
     if cached is not None:
         return cached
+    shared_cached = get_shared_json(_FILTERS_SHARED_CACHE_NAMESPACE, cache_key)
+    if isinstance(shared_cached, dict):
+        _filters_cache_set(cache_key, shared_cached)
+        return shared_cached
 
     manual_rows = db.query(ManualVehicle).filter(ManualVehicle.is_active == True).all()
     base_query = build_inventory_query(engine, {"vehicle_type": vehicle_type})
@@ -407,17 +458,19 @@ def inventory_filters(
 
     vins = [str(row._mapping.get("vin") or "").strip().upper() for row in rows if row._mapping.get("vin")]
     offer_map = _load_offer_map(db, vins)
-    ymm_keys_needed: set[tuple[int, str, str]] = set()
-    for row in rows:
-        mapping = row._mapping
-        key = _normalize_ymm_key(mapping.get("year"), mapping.get("make"), mapping.get("model"))
-        if key:
-            ymm_keys_needed.add(key)
-    for row in manual_rows:
-        key = _normalize_ymm_key(row.year, row.make, row.model)
-        if key:
-            ymm_keys_needed.add(key)
-    ymm_offer_map = _load_offer_ymm_map(db, ymm_keys_needed)
+    ymm_offer_map: dict[tuple[int, str, str], OfferOverride] = {}
+    if offers_only:
+        ymm_keys_needed: set[tuple[int, str, str]] = set()
+        for row in rows:
+            mapping = row._mapping
+            key = _normalize_ymm_key(mapping.get("year"), mapping.get("make"), mapping.get("model"))
+            if key:
+                ymm_keys_needed.add(key)
+        for row in manual_rows:
+            key = _normalize_ymm_key(row.year, row.make, row.model)
+            if key:
+                ymm_keys_needed.add(key)
+        ymm_offer_map = _load_offer_ymm_map(db, ymm_keys_needed)
 
     models_by_make: dict[str, set[str]] = {}
     trims_by_make_model: dict[str, set[str]] = {}
@@ -500,6 +553,7 @@ def inventory_filters(
         "trims_by_make_model": trims_by_make_model_sorted,
     }
     _filters_cache_set(cache_key, payload)
+    set_shared_json(_FILTERS_SHARED_CACHE_NAMESPACE, cache_key, payload, _SHARED_CACHE_TTL_SECONDS)
     return payload
 
 
@@ -509,20 +563,27 @@ def search_inventory(
     model: Optional[str] = None,
     trim: Optional[str] = None,
     year: Optional[int] = None,
-    vehicle_type: str = Query("all", pattern="^(new|used|all)$"),
+    vehicle_type: str = "all",
     max_price: Optional[float] = None,
     max_payment: Optional[float] = None,
-    down_payment: float = Query(0.0),
-    apr: float = Query(6.99),
-    term_months: int = Query(72),
+    down_payment: float = 0.0,
+    apr: float = 6.99,
+    term_months: int = 72,
     max_mileage: Optional[int] = None,
-    condition: str = Query("all", pattern="^(used|cpo|all)$"),
-    offers_only: bool = Query(False),
+    condition: str = "all",
+    offers_only: bool = False,
     sort: Optional[str] = None,
     page: int = 1,
     page_size: int = 20,
+    response: Response = None,
     db: Session = Depends(get_db),
 ):
+    if vehicle_type not in {"new", "used", "all"}:
+        raise HTTPException(status_code=422, detail="vehicle_type must be one of: new, used, all")
+    if condition not in {"used", "cpo", "all"}:
+        raise HTTPException(status_code=422, detail="condition must be one of: used, cpo, all")
+    if response is not None:
+        _set_edge_cache_headers(response)
     cache_key = _cache_key_from_params(
         make=make,
         model=model,
@@ -544,6 +605,31 @@ def search_inventory(
     cached = _cache_get(cache_key)
     if cached is not None:
         return InventorySearchResponse(**cached)
+    shared_cached = get_shared_json(_SEARCH_SHARED_CACHE_NAMESPACE, cache_key)
+    if isinstance(shared_cached, dict):
+        _cache_set(cache_key, shared_cached)
+        return InventorySearchResponse(**shared_cached)
+    use_hot_disk_cache = (
+        (offers_only and vehicle_type == "new" and page == 1)
+        or (
+            not offers_only
+            and vehicle_type in {"new", "used"}
+            and page in {1, 2}
+            and make is None
+            and model is None
+            and trim is None
+            and year is None
+            and max_payment is None
+            and max_mileage is None
+            and condition == "all"
+            and (max_price is None or float(max_price) >= 999999)
+        )
+    )
+    if use_hot_disk_cache:
+        hot_cached = _hot_cache_get(cache_key)
+        if isinstance(hot_cached, dict):
+            _cache_set(cache_key, hot_cached)
+            return InventorySearchResponse(**hot_cached)
 
     filters = {
         "make": make,
@@ -562,8 +648,8 @@ def search_inventory(
             filters = {**filters, "vin_in": lease_special_vins}
     base_query = build_inventory_query(engine, filters)
     if offers_only:
-        fetch_size = None
-        offset = 0
+        fetch_size = page_size
+        offset = (page - 1) * page_size
     elif max_payment is not None and max_payment > 0:
         fetch_size = min(500, max(page_size * 10, 100))
         offset = 0
@@ -579,33 +665,46 @@ def search_inventory(
     elif sort == "price_desc" and sort_col is not None:
         base_query = base_query.order_by(sort_col.desc())
 
+    is_broad_default_query = (
+        not offers_only
+        and make is None
+        and model is None
+        and trim is None
+        and year is None
+        and max_mileage is None
+        and condition == "all"
+        and vehicle_type in {"new", "used", "all"}
+        and (max_price is None or float(max_price) >= 999999)
+    )
+
     if offers_only:
-        total = None
-    elif max_payment is None or max_payment <= 0:
+        total = len(lease_special_vins)
+    elif (max_payment is None or max_payment <= 0) and not is_broad_default_query:
         total = db.execute(build_inventory_count_query(engine, filters)).scalar() or 0
     else:
         total = None
 
     if offers_only:
-        # Restrict to VINs that have a lease monthly in DB, then load all matching rows (bounded by
-        # offer count — not the first page_size rows of full inventory, which hid most specials).
-        rows = db.execute(base_query).fetchall() if lease_special_vins else []
+        rows = db.execute(base_query.limit(fetch_size).offset(offset)).fetchall() if lease_special_vins else []
     else:
         rows = db.execute(base_query.limit(fetch_size).offset(offset)).fetchall()
     vins = [r._mapping.get("vin") for r in rows if r._mapping.get("vin")]
     offer_map = _load_offer_map(db, vins)
-    ymm_keys_needed: set[tuple[int, str, str]] = set()
-    for row in rows:
-        mapping = row._mapping
-        key = _normalize_ymm_key(mapping.get("year"), mapping.get("make"), mapping.get("model"))
-        if key:
-            ymm_keys_needed.add(key)
-    manual_rows = db.query(ManualVehicle).filter(ManualVehicle.is_active == True).all()
-    for row in manual_rows:
-        key = _normalize_ymm_key(row.year, row.make, row.model)
-        if key:
-            ymm_keys_needed.add(key)
-    ymm_offer_map = _load_offer_ymm_map(db, ymm_keys_needed)
+    manual_rows = [] if offers_only else db.query(ManualVehicle).filter(ManualVehicle.is_active == True).all()
+    use_ymm_offer_fallback = any([make, model, trim, year])
+    ymm_offer_map: dict[tuple[int, str, str], OfferOverride] = {}
+    if use_ymm_offer_fallback:
+        ymm_keys_needed: set[tuple[int, str, str]] = set()
+        for row in rows:
+            mapping = row._mapping
+            key = _normalize_ymm_key(mapping.get("year"), mapping.get("make"), mapping.get("model"))
+            if key:
+                ymm_keys_needed.add(key)
+        for row in manual_rows:
+            key = _normalize_ymm_key(row.year, row.make, row.model)
+            if key:
+                ymm_keys_needed.add(key)
+        ymm_offer_map = _load_offer_ymm_map(db, ymm_keys_needed)
     dealer_emails = {
         email
         for email in (
@@ -614,7 +713,10 @@ def search_inventory(
         if email
     }
     dealer_phone_map = _dealer_phone_by_email(db, dealer_emails)
-    exact_score_map, trim_fallback_score_map, year_fallback_score_map, full_fallback_score_map = _load_score_maps(db, rows)
+    if offers_only or len(rows) > 100:
+        exact_score_map, trim_fallback_score_map, year_fallback_score_map, full_fallback_score_map = {}, {}, {}, {}
+    else:
+        exact_score_map, trim_fallback_score_map, year_fallback_score_map, full_fallback_score_map = _load_score_maps(db, rows)
 
     items = []
 
@@ -796,23 +898,37 @@ def search_inventory(
             existing_vins = {str(i.vin).strip().upper() for i in manual_items}
             items = manual_items + [i for i in items if str(i.vin).strip().upper() not in existing_vins]
         if offers_only:
-            total = len(items)
-            start = (page - 1) * page_size
-            items = items[start : start + page_size]
+            if total is None:
+                total = len(items)
+            items = items[:page_size]
         else:
             items = items[:page_size]
+
+    if total is None and not offers_only:
+        page_start = max(0, (page - 1) * page_size)
+        if len(items) >= page_size:
+            # Avoid expensive COUNT(*) on broad searches; keep pagination moving when a full page is present.
+            total = page_start + page_size + 1
+        else:
+            total = page_start + len(items)
 
     response = InventorySearchResponse(items=items, page=page, page_size=page_size, total=total or 0)
     payload = response.model_dump() if hasattr(response, "model_dump") else response.dict()
     _cache_set(cache_key, payload)
+    set_shared_json(_SEARCH_SHARED_CACHE_NAMESPACE, cache_key, payload, _SHARED_CACHE_TTL_SECONDS)
+    if use_hot_disk_cache:
+        _hot_cache_set(cache_key, payload)
     return response
 
 
 @router.get("/homepage-specials", response_model=InventorySearchResponse, response_model_exclude_none=True)
 def homepage_specials(
     limit: int = Query(_MAX_HOMEPAGE_FEATURED_VEHICLES, ge=1, le=_MAX_HOMEPAGE_FEATURED_VEHICLES),
+    response: Response = None,
     db: Session = Depends(get_db),
 ):
+    if response is not None:
+        _set_edge_cache_headers(response)
     month_key = _homepage_featured_key_for_read(db)
     cache_key = f"limit={limit}|month={month_key}"
     now = time.time()
@@ -821,6 +937,10 @@ def homepage_specials(
         expires_at, payload = cached
         if now < expires_at:
             return InventorySearchResponse(**payload)
+    shared_cached = get_shared_json(_HOMEPAGE_SPECIALS_SHARED_CACHE_NAMESPACE, cache_key)
+    if isinstance(shared_cached, dict):
+        _HOMEPAGE_SPECIALS_CACHE[cache_key] = (now + _HOMEPAGE_SPECIALS_CACHE_TTL_SECONDS, shared_cached)
+        return InventorySearchResponse(**shared_cached)
     featured_rows = (
         db.query(HomepageFeaturedVehicle)
         .filter(HomepageFeaturedVehicle.month_key == month_key)
@@ -1038,6 +1158,7 @@ def homepage_specials(
     )
     payload = response.model_dump() if hasattr(response, "model_dump") else response.dict()
     _HOMEPAGE_SPECIALS_CACHE[cache_key] = (now + _HOMEPAGE_SPECIALS_CACHE_TTL_SECONDS, payload)
+    set_shared_json(_HOMEPAGE_SPECIALS_SHARED_CACHE_NAMESPACE, cache_key, payload, _SHARED_CACHE_TTL_SECONDS)
     return response
 
 
@@ -1209,3 +1330,44 @@ def get_inventory_item(
         if score
         else None,
     )
+
+
+def warm_inventory_hot_cache(db: Session) -> None:
+    """
+    Prime the exact query shapes used by `/search` and `/lease-specials`
+    so first paint after backend restart avoids a long loader.
+    """
+    warm_queries = [
+        # Search page default first-page payload.
+        dict(
+            vehicle_type="new",
+            sort="best_deal",
+            page=1,
+            page_size=20,
+            max_price=999999,
+            db=db,
+        ),
+        # Search page second page (infinite scroll / next page taps).
+        dict(
+            vehicle_type="new",
+            sort="best_deal",
+            page=2,
+            page_size=20,
+            max_price=999999,
+            db=db,
+        ),
+        # Lease-specials top fold.
+        dict(
+            vehicle_type="new",
+            offers_only=True,
+            page=1,
+            page_size=12,
+            db=db,
+        ),
+    ]
+    for kwargs in warm_queries:
+        try:
+            search_inventory(**kwargs)
+        except Exception:
+            # Best-effort warmup only; do not fail startup path.
+            continue

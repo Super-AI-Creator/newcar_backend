@@ -1,5 +1,7 @@
 import os
 import logging
+import threading
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, Depends, HTTPException, Request
@@ -10,6 +12,8 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError
 
 from app.core.deps import get_current_user
+from app.core.config import settings
+from app.core.database import SessionLocal
 from app.routes import auth, inventory, favorites, broker, credit, docs, admin, dealer, payments, recommendations, vehicles, search_compat, frontend_compat, testimonials, deals, lenders, leads, webhooks, seo, credit_unions, landing, articles, cu_demo_contact
 from app.schemas.user import UserOut
 from app.services.sheets_scheduler import SheetsSyncScheduler
@@ -93,6 +97,25 @@ def start_background_jobs():
         _sheets_scheduler.start()
     except Exception:
         logger.exception("Sheets scheduler startup failed; continuing without background sync.")
+    if settings.inventory_startup_warmup_enabled:
+        def _run_inventory_warmup():
+            delay_seconds = max(0, int(settings.inventory_startup_warmup_delay_seconds))
+            if delay_seconds:
+                time.sleep(delay_seconds)
+            db = SessionLocal()
+            try:
+                inventory.warm_inventory_hot_cache(db)
+                logger.info("Inventory startup warmup completed.")
+            except Exception:
+                logger.exception("Inventory startup warmup failed; continuing without warm cache.")
+            finally:
+                db.close()
+
+        threading.Thread(
+            target=_run_inventory_warmup,
+            name="inventory-startup-warmup",
+            daemon=True,
+        ).start()
 
 
 @app.on_event("shutdown")
