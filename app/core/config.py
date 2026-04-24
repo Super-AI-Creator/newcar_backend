@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     lead_webhook_timeout_seconds: int = Field(10)
     lead_webhook_max_attempts: int = Field(3)
     lead_webhook_retry_backoff_seconds: float = Field(1.0)
+    # Trade-in lead notification inbox (defaults to broker_email when empty).
+    trade_in_notify_email: Optional[str] = Field(None)
     credit_application_webhook_url: Optional[str] = Field(None)
     credit_application_webhook_secret: Optional[str] = Field(None)
     credit_application_webhook_timeout_seconds: int = Field(15)

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user, get_db, require_role
@@ -12,6 +12,7 @@ from app.models.enums import DealStatus
 from app.models.user import User
 from app.schemas.deals import DealCreateIn, DealEventOut, DealOut, DealUpdateIn
 from app.services.cu_member_scope import resolve_member_scope_user_id
+from app.services.lead_delivery import send_lead_webhook
 
 router = APIRouter(prefix="/deals", tags=["deals"])
 
@@ -134,6 +135,7 @@ def _parse_optional_datetime(value: Optional[str]) -> Optional[datetime]:
 def create_deal(
     payload: DealCreateIn,
     member_user_id: Optional[int] = Query(None),
+    background_tasks: BackgroundTasks = None,
     user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -191,6 +193,22 @@ def create_deal(
     )
     db.commit()
     db.refresh(row)
+    if background_tasks is not None:
+        background_tasks.add_task(
+            send_lead_webhook,
+            {
+                "event": "deal.created",
+                "deal_id": int(row.id),
+                "user_id": int(row.user_id),
+                "vin": row.vin,
+                "status": row.status.value if hasattr(row.status, "value") else str(row.status),
+                "customer_note": row.customer_note,
+                "customer_email": getattr(user, "email", None),
+                "customer_name": getattr(user, "name", None),
+                "source": "deal_creation",
+                "created_at": str(row.created_at) if row.created_at else None,
+            },
+        )
     return _deal_dict_with_cu(db, row)
 
 

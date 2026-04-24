@@ -7,6 +7,7 @@ import httpx
 
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.core.email import EmailDeliveryError, send_email
 from app.models.lead_request import LeadRequest
 from app.services.ghl_contacts import create_ghl_contact_for_lead, lookup_ghl_contact_for_credit_payload
 
@@ -23,6 +24,7 @@ def build_lead_webhook_payload(row: LeadRequest) -> Dict[str, Any]:
     raw_notes = (row.notes or "").strip()
     notes = raw_notes if raw_notes else "No note"
     return {
+        "event": "lead.submitted",
         "lead_id": int(row.id),
         "created_at": _iso_or_none(row.created_at),
         "name": row.name,
@@ -37,6 +39,23 @@ def build_lead_webhook_payload(row: LeadRequest) -> Dict[str, Any]:
         "source": row.source,
         "notes": notes,
     }
+
+
+def is_trade_in_source(source: Optional[str]) -> bool:
+    return str(source or "").strip().lower().startswith("trade_in")
+
+
+def build_trade_in_webhook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    body = dict(payload)
+    body["event"] = "trade_in.submitted"
+    body["lead_type"] = "trade_in"
+    body["formatted_plain"] = str(payload.get("notes") or "").strip()
+    body["formatted_html"] = (
+        "<pre style=\"font-family:system-ui,sans-serif;white-space:pre-wrap;line-height:1.4;\">"
+        + str(payload.get("notes") or "").strip()
+        + "</pre>"
+    )
+    return body
 
 
 def is_lead_webhook_enabled() -> bool:
@@ -74,16 +93,21 @@ def process_new_lead_integrations(payload: Dict[str, Any]) -> None:
     the webhook is still sent when enabled (same as before for those cases).
     """
     lead_id = payload.get("lead_id")
+    lead_source = payload.get("source")
+    trade_in_lead = is_trade_in_source(lead_source)
 
     existing_id, gh_status = lookup_ghl_contact_for_credit_payload(payload)
     contact_already_in_ghl = gh_status == "found" and bool(existing_id)
 
     create_ghl_contact_for_lead(payload)
 
-    if not is_lead_webhook_enabled():
+    webhook_enabled = is_lead_webhook_enabled()
+    if trade_in_lead:
+        send_trade_in_email_notification(payload)
+    if not webhook_enabled:
         return
 
-    if contact_already_in_ghl:
+    if contact_already_in_ghl and not trade_in_lead:
         _update_lead_delivery_state(
             lead_id,
             webhook_status="skipped",
@@ -96,7 +120,8 @@ def process_new_lead_integrations(payload: Dict[str, Any]) -> None:
         )
         return
 
-    send_lead_webhook(payload)
+    webhook_payload = build_trade_in_webhook_payload(payload) if trade_in_lead else payload
+    send_lead_webhook(webhook_payload)
 
 
 def send_lead_webhook(payload: Dict[str, Any]) -> None:
@@ -157,3 +182,49 @@ def send_lead_webhook(payload: Dict[str, Any]) -> None:
                 continue
             sleep_seconds = base_backoff_seconds * (2 ** (attempt - 1))
             time.sleep(sleep_seconds)
+
+
+def send_trade_in_email_notification(payload: Dict[str, Any]) -> None:
+    to_email = (settings.trade_in_notify_email or settings.broker_email or "").strip()
+    if not to_email:
+        logger.warning("Trade-in email skipped: no TRADE_IN_NOTIFY_EMAIL or BROKER_EMAIL configured.")
+        return
+
+    lead_id = payload.get("lead_id")
+    name = str(payload.get("name") or "").strip() or "Trade-in lead"
+    email = str(payload.get("email") or "").strip()
+    phone = str(payload.get("phone") or "").strip()
+    vehicle = str(payload.get("vehicle") or "").strip()
+    source = str(payload.get("source") or "").strip() or "trade_in"
+    notes = str(payload.get("notes") or "").strip() or "No notes provided."
+
+    subject = f"Trade-in Lead #{lead_id} — {name}" if lead_id else f"Trade-in Lead — {name}"
+    lines = [
+        f"Lead ID: {lead_id or '—'}",
+        f"Source: {source}",
+        f"Name: {name}",
+        f"Email: {email or '—'}",
+        f"Phone: {phone or '—'}",
+        f"Vehicle: {vehicle or '—'}",
+        "",
+        "Trade-in details:",
+        notes,
+    ]
+    plain = "\n".join(lines)
+    html = (
+        "<p style=\"font-family:system-ui,sans-serif;font-size:14px;color:#333;\">"
+        f"<strong>Lead ID:</strong> {lead_id or '—'}<br/>"
+        f"<strong>Source:</strong> {source}<br/>"
+        f"<strong>Name:</strong> {name}<br/>"
+        f"<strong>Email:</strong> {email or '—'}<br/>"
+        f"<strong>Phone:</strong> {phone or '—'}<br/>"
+        f"<strong>Vehicle:</strong> {vehicle or '—'}"
+        "</p>"
+        "<pre style=\"font-family:system-ui,sans-serif;white-space:pre-wrap;line-height:1.4;border:1px solid #ddd;padding:12px;border-radius:8px;\">"
+        + notes
+        + "</pre>"
+    )
+    try:
+        send_email(to_email=to_email, subject=subject, body=plain, html_body=html)
+    except EmailDeliveryError:
+        logger.exception("Trade-in email delivery failed for lead_id=%s", lead_id)

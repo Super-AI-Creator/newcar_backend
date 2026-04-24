@@ -22,7 +22,7 @@ def _serialize(row: LenderRate) -> dict:
 
 
 @router.get("/rates")
-def list_rates(db: Session = Depends(get_db), user=Depends(require_role("broker_admin"))):
+def list_rates(db: Session = Depends(get_db), user=Depends(require_role("broker_admin", "super_admin"))):
     _ = user
     rows = (
         db.query(LenderRate)
@@ -33,7 +33,7 @@ def list_rates(db: Session = Depends(get_db), user=Depends(require_role("broker_
 
 
 @router.post("/rates")
-def create_rate(payload: LenderRateIn, db: Session = Depends(get_db), user=Depends(require_role("broker_admin"))):
+def create_rate(payload: LenderRateIn, db: Session = Depends(get_db), user=Depends(require_role("broker_admin", "super_admin"))):
     _ = user
     row = LenderRate(
         lender_name=payload.lender_name.strip(),
@@ -53,7 +53,7 @@ def update_rate(
     rate_id: int,
     payload: LenderRateIn,
     db: Session = Depends(get_db),
-    user=Depends(require_role("broker_admin")),
+    user=Depends(require_role("broker_admin", "super_admin")),
 ):
     _ = user
     row = db.query(LenderRate).filter(LenderRate.id == rate_id).first()
@@ -70,7 +70,7 @@ def update_rate(
 
 
 @router.delete("/rates/{rate_id}")
-def delete_rate(rate_id: int, db: Session = Depends(get_db), user=Depends(require_role("broker_admin"))):
+def delete_rate(rate_id: int, db: Session = Depends(get_db), user=Depends(require_role("broker_admin", "super_admin"))):
     _ = user
     row = db.query(LenderRate).filter(LenderRate.id == rate_id).first()
     if not row:
