@@ -88,11 +88,15 @@ class Settings(BaseSettings):
     # Optional comma-separated list of extra origins for the standalone CU API.
     # Parsed by credit_union_platform/backend/main.py.
     cu_cors_origins: Optional[str] = Field(None)
-    # When set, CU white-label portal and approval *claim* links prefer this base over frontend_base_url.
-    # Member *signup* (join) links after pre-approval use frontend_base_url first, then this as fallback.
+    # When set, CU white-label portal and approval claim/invite/join links prefer this base.
+    # Fallback is frontend_base_url when this is empty.
     cu_portal_base_url: Optional[str] = Field(None)
     # Marketing demo form on CU landing: notify this address (default chris@carscu.com).
     cu_demo_contact_notify_email: str = Field("chris@carscu.com")
+    # CU pre-approval / member reminder emails: optional From override (e.g. noreply@carscu.com). Must be allowed by your SMTP/Resend domain.
+    cu_approval_from_email: Optional[str] = Field(None)
+    # When true (and cu_approval_from_email is unset), use each credit union's contact_email as From when present.
+    cu_approval_from_cu_contact: bool = Field(False)
     # Per client IP (or X-Forwarded-For) sliding-window cap for POST /public/cu-demo-contact.
     cu_demo_contact_rate_limit_per_minute: int = Field(8, ge=1, le=120)
     # When set, member/broker deal-room messages assign to this broker_admin user only (e.g. Power Auto Buying).

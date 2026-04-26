@@ -150,8 +150,8 @@ def _portal_base_url() -> str:
 
 
 def _platform_member_site_base_url() -> str:
-    """Main consumer site (e.g. join/register). Prefer over CU portal for member signup links."""
-    return (settings.frontend_base_url or settings.cu_portal_base_url or "").rstrip("/")
+    """Main member site base for invite/join links; prefer CU portal domain."""
+    return (settings.cu_portal_base_url or settings.frontend_base_url or "").rstrip("/")
 
 
 # ---------- Admin: Credit Unions (super_admin) ----------
@@ -599,7 +599,8 @@ def remind_credit_union_member_onboarding(
                 f"If you have questions, contact your credit union.\n"
             )
             try:
-                send_email(to_email=to_email, subject=subject, body=body)
+                fe, rt = _cu_member_mail_from_reply(cu)
+                send_email(to_email=to_email, subject=subject, body=body, from_email=fe, reply_to=rt)
                 email_sent = True
             except EmailDeliveryError:
                 email_sent = False
@@ -620,7 +621,8 @@ def remind_credit_union_member_onboarding(
                 f"If you need help, contact your credit union.\n"
             )
             try:
-                send_email(to_email=to_email, subject=subject, body=body)
+                fe, rt = _cu_member_mail_from_reply(cu)
+                send_email(to_email=to_email, subject=subject, body=body, from_email=fe, reply_to=rt)
                 email_sent = True
             except EmailDeliveryError:
                 email_sent = False
@@ -793,6 +795,12 @@ class ApprovalUpdate(BaseModel):
     status: Optional[str] = None
     approval_code: Optional[str] = None
     interest_rate: Optional[float] = None
+    loan_amount: Optional[float] = None
+    term_months: Optional[int] = None
+    special_notes: Optional[str] = None
+    member_name: Optional[str] = None
+    member_phone: Optional[str] = None
+    member_email: Optional[str] = None
 
 
 _ALLOWED_APPROVAL_STATUSES = {
@@ -829,6 +837,23 @@ def _validate_approval_reference_code(code: str) -> str:
             detail="Reference code may only contain letters, numbers, hyphens, and underscores.",
         )
     return c
+
+
+def _cu_member_mail_from_reply(cu: CreditUnion) -> tuple[Optional[str], Optional[str]]:
+    """(from_email, reply_to) for CU pre-approval and member reminder mail.
+
+    ``CU_APPROVAL_FROM_EMAIL`` wins (e.g. noreply@…); replies go to ``contact_email`` when set.
+    Otherwise, if ``CU_APPROVAL_FROM_CU_CONTACT`` is true, use the CU's ``contact_email`` as From.
+    """
+    override = (settings.cu_approval_from_email or "").strip()
+    if override:
+        reply = (cu.contact_email or "").strip() or None
+        return override, reply
+    if settings.cu_approval_from_cu_contact:
+        contact = (cu.contact_email or "").strip()
+        if contact:
+            return contact, None
+    return None, None
 
 
 def _serialize_approval(a: CuMemberApproval, include_cu_name: bool = False) -> dict:
@@ -936,7 +961,14 @@ def create_approval(
             f"If you have questions, reply to this email or contact your credit union.\n"
         )
         try:
-            send_email(to_email=approval.member_email, subject=subject, body=body)
+            fe, rt = _cu_member_mail_from_reply(cu)
+            send_email(
+                to_email=approval.member_email,
+                subject=subject,
+                body=body,
+                from_email=fe,
+                reply_to=rt,
+            )
             email_sent = True
         except EmailDeliveryError:
             email_sent = False
@@ -1025,8 +1057,25 @@ def update_approval_status(
     )
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found.")
-    if payload.status is None and payload.approval_code is None and payload.interest_rate is None:
-        raise HTTPException(status_code=400, detail="Provide status, approval_code, and/or interest_rate to update.")
+    if (
+        payload.status is None
+        and payload.approval_code is None
+        and payload.interest_rate is None
+        and payload.loan_amount is None
+        and payload.term_months is None
+        and payload.special_notes is None
+        and payload.member_name is None
+        and payload.member_phone is None
+        and payload.member_email is None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Provide one or more fields to update "
+                "(status, approval_code, interest_rate, loan_amount, term_months, "
+                "special_notes, member_name, member_phone, member_email)."
+            ),
+        )
 
     if payload.approval_code is not None:
         if not _can_create_cu_preapproval(user, cu_id):
@@ -1065,9 +1114,133 @@ def update_approval_status(
         if payload.interest_rate < 0:
             raise HTTPException(status_code=400, detail="Rate must be a positive number.")
         approval.interest_rate = Decimal(str(payload.interest_rate))
+    if payload.loan_amount is not None:
+        if payload.loan_amount <= 0:
+            raise HTTPException(status_code=400, detail="Loan amount must be greater than zero.")
+        approval.loan_amount = Decimal(str(payload.loan_amount))
+    if payload.term_months is not None:
+        if payload.term_months <= 0:
+            raise HTTPException(status_code=400, detail="Term must be at least 1 month.")
+        approval.term_months = int(payload.term_months)
+    if payload.special_notes is not None:
+        approval.special_notes = (payload.special_notes or "").strip() or None
+    if payload.member_name is not None:
+        approval.member_name = (payload.member_name or "").strip() or None
+    if payload.member_phone is not None:
+        approval.member_phone = (payload.member_phone or "").strip() or None
+    if payload.member_email is not None:
+        approval.member_email = (payload.member_email or "").strip().lower() or None
     db.commit()
     db.refresh(approval)
     return {"item": _serialize_approval(approval)}
+
+
+@router.delete("/admin/credit-unions/{cu_id}/approvals/{approval_id}")
+def delete_approval(
+    cu_id: int,
+    approval_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not _can_create_cu_preapproval(user, cu_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Only credit union staff can delete pre-approvals for their organization.",
+        )
+    approval = (
+        db.query(CuMemberApproval)
+        .filter(CuMemberApproval.id == approval_id, CuMemberApproval.credit_union_id == cu_id)
+        .first()
+    )
+    if not approval:
+        raise HTTPException(status_code=404, detail="Approval not found.")
+    db.delete(approval)
+    db.commit()
+    return {"deleted": True, "id": approval_id}
+
+
+@router.post("/admin/credit-unions/{cu_id}/approvals/{approval_id}/resend-invite")
+def resend_approval_invite(
+    cu_id: int,
+    approval_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not _can_create_cu_preapproval(user, cu_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Only credit union staff can resend pre-approval invites.",
+        )
+    cu = db.query(CreditUnion).filter(CreditUnion.id == cu_id).first()
+    if not cu:
+        raise HTTPException(status_code=404, detail="Credit union not found.")
+    approval = (
+        db.query(CuMemberApproval)
+        .filter(CuMemberApproval.id == approval_id, CuMemberApproval.credit_union_id == cu_id)
+        .first()
+    )
+    if not approval:
+        raise HTTPException(status_code=404, detail="Approval not found.")
+    if approval.user_id is not None:
+        raise HTTPException(status_code=400, detail="Approval already claimed by a member.")
+
+    portal_base = _portal_base_url()
+    platform_base = _platform_member_site_base_url()
+    claim_url = (
+        f"{portal_base}/approvals/{approval.approval_code}"
+        if portal_base
+        else f"/approvals/{approval.approval_code}"
+    )
+    join_url = (
+        f"{platform_base}/creditunions/join?token={cu.signup_token}&approval={approval.approval_code}"
+        if platform_base
+        else f"/creditunions/join?token={cu.signup_token}&approval={approval.approval_code}"
+    )
+    sms_sent = False
+    email_sent = False
+    if approval.member_phone:
+        body = f"{cu.name}: Reminder — your pre-approved auto loan is ready. View letter: {claim_url}"
+        sms_sent = send_sms(approval.member_phone, body[:480])
+    if approval.member_email:
+        subject = f"{cu.name}: Reminder — your auto loan pre-approval is ready"
+        greet = (approval.member_name or "").strip()
+        salutation = f"Hello {greet},\n\n" if greet else "Hello,\n\n"
+        body = (
+            salutation
+            + f"This is a reminder from {cu.name} regarding your auto loan pre-approval.\n\n"
+            f"Approval amount: ${float(approval.loan_amount):,.2f}\n"
+            f"Term: {approval.term_months} months\n"
+            f"Rate: {float(approval.interest_rate or 0):.2f}% APR\n"
+            f"Reference code: {approval.approval_code}\n\n"
+            f"Open your approval letter:\n{claim_url}\n\n"
+            f"Create/sign in to your member portal:\n{join_url}\n\n"
+            f"If you have questions, reply to this email or contact your credit union.\n"
+        )
+        try:
+            fe, rt = _cu_member_mail_from_reply(cu)
+            send_email(
+                to_email=approval.member_email,
+                subject=subject,
+                body=body,
+                from_email=fe,
+                reply_to=rt,
+            )
+            email_sent = True
+        except EmailDeliveryError:
+            email_sent = False
+    if not email_sent and not sms_sent:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not resend invite: approval has no member email and no member phone.",
+        )
+    return {
+        "ok": True,
+        "approval_id": approval_id,
+        "email_sent": email_sent,
+        "sms_sent": sms_sent,
+        "claim_url": claim_url,
+        "join_url": join_url,
+    }
 
 
 @router.patch("/approvals/claim/{code}")
