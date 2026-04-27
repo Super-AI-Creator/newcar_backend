@@ -146,12 +146,21 @@ def _serialize_cu(cu: CreditUnion, include_relations: bool = True) -> dict:
 
 
 def _portal_base_url() -> str:
-    return (settings.cu_portal_base_url or settings.frontend_base_url or "").rstrip("/")
+    base = (settings.cu_portal_base_url or settings.frontend_base_url or "").rstrip("/")
+    low = base.lower()
+    # Safety net for deployments still carrying legacy frontend URL env values.
+    if "newcar-frontend.vercel.app" in low:
+        return "https://carscu.com"
+    return base
 
 
 def _platform_member_site_base_url() -> str:
     """Main member site base for invite/join links; prefer CU portal domain."""
-    return (settings.cu_portal_base_url or settings.frontend_base_url or "").rstrip("/")
+    base = (settings.cu_portal_base_url or settings.frontend_base_url or "").rstrip("/")
+    low = base.lower()
+    if "newcar-frontend.vercel.app" in low:
+        return "https://carscu.com"
+    return base
 
 
 # ---------- Admin: Credit Unions (super_admin) ----------
@@ -487,7 +496,7 @@ def get_my_credit_union_staff_dashboard(
     if not cu:
         raise HTTPException(status_code=404, detail="Credit union not found.")
     rel = f"/creditunions/join?token={cu.signup_token}" if cu.signup_token else None
-    base = (settings.cu_portal_base_url or settings.frontend_base_url or "").rstrip("/")
+    base = _portal_base_url()
     signup_link = f"{base}{rel}" if (base and rel) else rel
     return {
         "name": cu.name,
@@ -1022,7 +1031,7 @@ def get_approval_by_code(code: str, db: Session = Depends(get_db)):
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found.")
     cu = db.query(CreditUnion).filter(CreditUnion.id == approval.credit_union_id).first()
-    base = (settings.cu_portal_base_url or settings.frontend_base_url or "").rstrip("/")
+    base = _portal_base_url()
     portal_url = None
     if cu and cu.slug and base:
         portal_url = f"{base}/cu/{cu.slug}"
