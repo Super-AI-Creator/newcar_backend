@@ -201,6 +201,19 @@ def build_inventory_query(engine: Engine, filters: Dict[str, Any]):
     )
     if dealer_email_col is not None:
         dealer_email_col = dealer_email_col.label("dealer_email")
+    dealer_address_col = _first_available_column(
+        dealer_sources,
+        [
+            "address",
+            "street_address",
+            "dealer_address",
+            "physical_address",
+            "location",
+            "dealer_street",
+        ],
+    )
+    if dealer_address_col is not None:
+        dealer_address_col = dealer_address_col.label("dealer_address")
 
     sort_price_col = None
     if vehicle_type_col is not None:
@@ -229,6 +242,7 @@ def build_inventory_query(engine: Engine, filters: Dict[str, Any]):
         dealer_name_col,
         dealer_phone_col,
         dealer_email_col,
+        dealer_address_col,
         sort_price_col,
     ]:
         if col is not None:
