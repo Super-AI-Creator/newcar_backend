@@ -10,6 +10,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import case, func, or_, select, true
 from sqlalchemy.orm import Session
 
+from app.core.auth_realm import AUTH_REALM_CARSCU
 from app.core.config import settings
 from app.core.database import engine
 from app.core.deps import get_db, require_role
@@ -1337,6 +1338,7 @@ def admin_create_user(
         password_hash=hash_password(pwd),
         credit_union_id=payload.credit_union_id,
         phone=None,
+        auth_realm=AUTH_REALM_CARSCU,
         is_email_verified=True,
         is_phone_verified=False,
     )

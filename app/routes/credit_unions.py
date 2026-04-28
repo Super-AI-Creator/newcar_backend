@@ -12,6 +12,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.auth_realm import AUTH_REALM_CARSCU
 from app.core.config import settings
 from app.core.email import EmailDeliveryError, send_email
 from app.core.deps import get_current_user, get_db, require_role
@@ -279,6 +280,7 @@ def admin_assign_credit_union_staff(
             )
         target.role = UserRole.credit_union
         target.credit_union_id = cu_id
+        target.auth_realm = AUTH_REALM_CARSCU
         db.commit()
         return {
             "ok": True,
@@ -305,6 +307,7 @@ def admin_assign_credit_union_staff(
         password_hash=hash_password(pwd),
         credit_union_id=cu_id,
         phone=None,
+        auth_realm=AUTH_REALM_CARSCU,
         is_email_verified=True,
         is_phone_verified=False,
     )

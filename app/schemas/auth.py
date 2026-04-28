@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field
 
 
+AuthRealm = Literal["carscu", "newcar_superstore"]
+
+
 class GoogleAuthRequest(BaseModel):
     id_token: str
+    """Which public site is signing in (isolates accounts vs carscu.com)."""
+    auth_realm: Optional[AuthRealm] = None
 
 
 class TokenResponse(BaseModel):
@@ -37,6 +42,7 @@ class RegisterRequest(BaseModel):
         max_length=128,
         description="One-time personal invite from CU staff; takes precedence over cu_signup_token.",
     )
+    auth_realm: AuthRealm
 
 
 class RegisterVerifyRequest(BaseModel):
@@ -45,11 +51,13 @@ class RegisterVerifyRequest(BaseModel):
     channel: str = Field(default="email", pattern="^(email|sms)$")
     cu_signup_token: Optional[str] = Field(default=None, max_length=128)
     member_invite_token: Optional[str] = Field(default=None, max_length=128)
+    auth_realm: Optional[AuthRealm] = None
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+    auth_realm: Optional[AuthRealm] = None
 
 
 class ProfileUpdateRequest(BaseModel):

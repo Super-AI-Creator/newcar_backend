@@ -1,7 +1,9 @@
 from typing import Optional
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.auth_realm import ALLOWED_AUTH_REALMS
 
 
 class Settings(BaseSettings):
@@ -108,6 +110,17 @@ class Settings(BaseSettings):
     # Warm critical inventory caches on backend startup (search + lease-specials first paint).
     inventory_startup_warmup_enabled: bool = Field(True)
     inventory_startup_warmup_delay_seconds: int = Field(2, ge=0, le=300)
+    # Users with NULL auth_realm (pre-migration) may only authenticate when the client resolves to this realm.
+    # Default newcar_superstore: legacy rows sign in on NewCarSuperstore, not on carscu.com.
+    auth_realm_legacy_default: str = Field("newcar_superstore")
+
+    @field_validator("auth_realm_legacy_default")
+    @classmethod
+    def _validate_auth_realm_legacy_default(cls, v: str) -> str:
+        s = (v or "newcar_superstore").strip()
+        if s not in ALLOWED_AUTH_REALMS:
+            raise ValueError(f"auth_realm_legacy_default must be one of: {', '.join(sorted(ALLOWED_AUTH_REALMS))}")
+        return s
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
