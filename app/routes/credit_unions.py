@@ -1269,6 +1269,8 @@ def claim_approval(
         return {"item": _serialize_approval(approval), "already_claimed": True}
     approval.user_id = user.id
     approval.status = "claimed"
+    if user.credit_union_id is None:
+        user.credit_union_id = approval.credit_union_id
     db.commit()
     db.refresh(approval)
     return {"item": _serialize_approval(approval), "claimed": True}

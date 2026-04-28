@@ -22,6 +22,7 @@ from app.models.enums import OtpChannel, UserRole
 from app.models.credit_union import CreditUnion, CreditUnionMemberInvite
 from app.models.user import User
 from app.schemas.user import UserOut
+from app.services.user_out import build_user_out
 from app.schemas.auth import (
     GoogleAuthRequest,
     LoginRequest,
@@ -328,7 +329,7 @@ def update_profile(payload: ProfileUpdateRequest, user=Depends(get_current_user)
     row.phone = payload.phone
     db.commit()
     db.refresh(row)
-    return row
+    return build_user_out(db, row)
 
 
 @router.post("/me/change-password")
