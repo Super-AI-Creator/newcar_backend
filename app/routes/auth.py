@@ -99,6 +99,11 @@ def _legacy_realm() -> str:
     return (settings.auth_realm_legacy_default or "newcar_superstore").strip()
 
 
+def _register_effective_realm(data: RegisterRequest) -> str:
+    """Explicit auth_realm from client, or server default when omitted (avoids 422 for older builds)."""
+    return data.auth_realm if data.auth_realm is not None else _legacy_realm()
+
+
 @router.post("/google", response_model=TokenResponse)
 def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
     try:
@@ -117,11 +122,7 @@ def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
 
     user = db.query(User).filter(User.email == email).first()
     if not user:
-        if not payload.auth_realm:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="auth_realm is required for Google sign-in (carscu or newcar_superstore).",
-            )
+        realm = payload.auth_realm if payload.auth_realm is not None else _legacy_realm()
         user = User(
             email=email,
             name=name,
@@ -129,7 +130,7 @@ def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
             is_email_verified=email_verified,
             is_phone_verified=False,
             password_hash=None,
-            auth_realm=payload.auth_realm,
+            auth_realm=realm,
         )
         db.add(user)
         db.commit()
@@ -169,6 +170,7 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
     else:
         credit_union_id = _credit_union_id_from_signup_payload(db, data)
 
+    realm = _register_effective_realm(data)
     user = User(
         email=data.email,
         phone=data.phone,
@@ -176,7 +178,7 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
         password_hash=password_hash,
         role=UserRole.customer,
         credit_union_id=credit_union_id,
-        auth_realm=data.auth_realm,
+        auth_realm=realm,
         is_email_verified=True,
         is_phone_verified=bool(data.phone),
     )
@@ -198,6 +200,7 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
 @router.post("/otp/request")
 def request_otp(data: RegisterRequest, db: Session = Depends(get_db)):
     channel = _to_channel(data.channel)
+    realm = _register_effective_realm(data)
 
     user = db.query(User).filter(User.email == data.email).first()
     if user and _is_registration_complete(user) and user.password_hash:
@@ -206,7 +209,7 @@ def request_otp(data: RegisterRequest, db: Session = Depends(get_db)):
     password_hash = hash_password(data.password)
     credit_union_id = _credit_union_id_from_signup_payload(db, data)
     if user:
-        if user.auth_realm and user.auth_realm != data.auth_realm:
+        if user.auth_realm and user.auth_realm != realm:
             raise HTTPException(
                 status_code=409,
                 detail="Continue registration on the site where you started, or use a different email address.",
@@ -214,7 +217,7 @@ def request_otp(data: RegisterRequest, db: Session = Depends(get_db)):
         user.name = data.name
         user.phone = data.phone
         user.password_hash = password_hash
-        user.auth_realm = data.auth_realm
+        user.auth_realm = realm
         if credit_union_id is not None:
             user.credit_union_id = credit_union_id
     else:
@@ -225,7 +228,7 @@ def request_otp(data: RegisterRequest, db: Session = Depends(get_db)):
             password_hash=password_hash,
             role=UserRole.customer,
             credit_union_id=credit_union_id,
-            auth_realm=data.auth_realm,
+            auth_realm=realm,
             is_email_verified=False,
             is_phone_verified=False,
         )
