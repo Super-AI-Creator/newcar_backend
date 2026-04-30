@@ -646,9 +646,22 @@ def search_inventory(
         lease_special_vins = _vins_with_lease_monthly_in_db(db)
         if lease_special_vins:
             filters = {**filters, "vin_in": lease_special_vins}
+    # Broad lease-specials (no Y/M/M filter): UI groups by lineup client-side and needs many rows across brands.
+    lease_broad = bool(
+        offers_only
+        and lease_special_vins
+        and (make is None or str(make).strip() == "")
+        and (model is None or str(model).strip() == "")
+        and (trim is None or str(trim).strip() == "")
+        and year is None
+    )
     base_query = build_inventory_query(engine, filters)
     if offers_only:
-        fetch_size = page_size
+        vin_n = len(lease_special_vins)
+        if lease_broad and vin_n:
+            fetch_size = min(max(page_size, 4000), 12000, vin_n)
+        else:
+            fetch_size = page_size
         offset = (page - 1) * page_size
     elif max_payment is not None and max_payment > 0:
         fetch_size = min(500, max(page_size * 10, 100))
@@ -664,6 +677,18 @@ def search_inventory(
         base_query = base_query.order_by(sort_col.asc())
     elif sort == "price_desc" and sort_col is not None:
         base_query = base_query.order_by(sort_col.desc())
+    elif lease_broad:
+        make_o = base_query.selected_columns.get("make")
+        model_o = base_query.selected_columns.get("model")
+        year_o = base_query.selected_columns.get("year")
+        vin_o = base_query.selected_columns.get("vin")
+        if make_o is not None and model_o is not None:
+            order_parts = [make_o.asc(), model_o.asc()]
+            if year_o is not None:
+                order_parts.insert(0, year_o.desc())
+            if vin_o is not None:
+                order_parts.append(vin_o.asc())
+            base_query = base_query.order_by(*order_parts)
 
     is_broad_default_query = (
         not offers_only
@@ -893,7 +918,8 @@ def search_inventory(
                 items = manual_filtered + [i for i in items if str(i.vin).strip().upper() not in existing_vins]
         total = len(items)
         start = (page - 1) * page_size
-        items = items[start : start + page_size]
+        slice_len = fetch_size if offers_only and lease_broad else page_size
+        items = items[start : start + slice_len]
     else:
         if total is not None:
             total += manual_match_count
@@ -903,7 +929,8 @@ def search_inventory(
         if offers_only:
             if total is None:
                 total = len(items)
-            items = items[:page_size]
+            slice_len = fetch_size if lease_broad else page_size
+            items = items[:slice_len]
         else:
             items = items[:page_size]
 
