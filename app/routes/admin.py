@@ -1323,8 +1323,8 @@ def admin_create_user(
     if role_enum == UserRole.credit_union and not payload.credit_union_id:
         raise HTTPException(status_code=400, detail="credit_union role requires credit_union_id.")
     email = str(payload.email).strip().lower()
-    if db.query(User).filter(User.email == email).first():
-        raise HTTPException(status_code=400, detail="A user with this email already exists.")
+    if db.query(User).filter(User.email == email, User.auth_realm == AUTH_REALM_CARSCU).first():
+        raise HTTPException(status_code=400, detail="A user with this email already exists for carscu.")
     pwd = (payload.password or "").strip()
     if len(pwd) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")

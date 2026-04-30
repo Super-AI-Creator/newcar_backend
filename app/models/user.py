@@ -1,13 +1,16 @@
 from sqlalchemy import BigInteger, Column, DateTime, Enum, ForeignKey, String, Boolean, func
+from sqlalchemy.schema import UniqueConstraint
+
 from app.models.base import Base
 from app.models.enums import UserRole
 
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("email", "auth_realm", name="uq_users_email_auth_realm"),)
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    email = Column(String(255), unique=True, nullable=False, index=True)
+    email = Column(String(255), nullable=False, index=True)
     phone = Column(String(50), nullable=True)
     name = Column(String(255), nullable=False)
     password_hash = Column(String(255), nullable=True)

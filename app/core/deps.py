@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
@@ -8,6 +10,22 @@ from app.models.user import User
 
 
 security = HTTPBearer(auto_error=False)
+
+
+def user_from_access_token_subject(db: Session, sub: Optional[str]) -> Optional[User]:
+    """
+    Resolve JWT subject to a User row.
+    New tokens use numeric user id; legacy tokens used email (unique before composite email+realm).
+    """
+    if not sub:
+        return None
+    sub_s = str(sub).strip()
+    if sub_s.isdigit():
+        return db.query(User).filter(User.id == int(sub_s)).first()
+    rows = db.query(User).filter(User.email == sub_s).all()
+    if len(rows) == 1:
+        return rows[0]
+    return None
 
 
 def get_db():
@@ -42,14 +60,14 @@ def get_current_user(
             detail="Login to continue",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    email = payload.get("sub")
-    if not email:
+    sub = payload.get("sub")
+    if not sub:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Login to continue",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    user = db.query(User).filter(User.email == email).first()
+    user = user_from_access_token_subject(db, sub)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -8,7 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.deps import get_db, security
+from app.core.deps import get_db, security, user_from_access_token_subject
 from app.core.security import decode_token
 from app.models.lead_request import LeadRequest
 from app.models.user import User
@@ -39,10 +39,8 @@ def _resolve_optional_user(
         return None
     if payload.get("type") != "access":
         return None
-    email = payload.get("sub")
-    if not email:
-        return None
-    return db.query(User).filter(User.email == email).first()
+    sub = payload.get("sub")
+    return user_from_access_token_subject(db, sub)
 
 
 @router.post("/upload-photo")

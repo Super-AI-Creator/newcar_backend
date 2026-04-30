@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.core.auth_realm import AUTH_REALM_CARSCU
 from app.core.deps import get_current_user, get_db, require_role
 from app.models.credit_union import CreditUnion, CuMemberApproval
 from app.models.deal import Deal
@@ -300,7 +301,13 @@ def update_deal(
                 message="Assigned broker cleared",
             )
         else:
-            broker_user = db.query(User).filter(User.email == normalized_email).first()
+            broker_user = (
+                db.query(User)
+                .filter(User.email == normalized_email, User.auth_realm == AUTH_REALM_CARSCU)
+                .first()
+            )
+            if not broker_user:
+                broker_user = db.query(User).filter(User.email == normalized_email).first()
             if not broker_user:
                 raise HTTPException(status_code=404, detail="Assigned broker email not found")
             broker_role = broker_user.role.value if hasattr(broker_user.role, "value") else str(broker_user.role)

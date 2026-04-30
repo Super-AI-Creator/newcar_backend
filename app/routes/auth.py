@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import secrets
 from datetime import datetime, timedelta
 
@@ -116,20 +118,25 @@ def _register_effective_realm(data: RegisterRequest) -> str:
     return data.auth_realm if data.auth_realm is not None else _legacy_realm()
 
 
-def _email_already_registered_detail(existing: User, requested_realm: str) -> str:
-    """409 body when email exists with a password — clearer if the account lives on the other public site."""
-    st = (existing.auth_realm or "").strip() or None
-    if st == AUTH_REALM_NEWCAR_SUPERSTORE and requested_realm == AUTH_REALM_CARSCU:
-        return (
-            "This email already has an account on New Car Superstore. "
-            "Sign in there with your password, or use a different email to register on carscu."
-        )
-    if st == AUTH_REALM_CARSCU and requested_realm == AUTH_REALM_NEWCAR_SUPERSTORE:
-        return (
-            "This email already has an account on carscu.com. "
-            "Sign in there with your password, or use a different email to register on New Car Superstore."
-        )
-    return "User already registered. Please log in."
+def _verify_effective_realm(data: RegisterVerifyRequest) -> str:
+    return data.auth_realm if data.auth_realm is not None else _legacy_realm()
+
+
+def _login_effective_realm(data: LoginRequest) -> str:
+    return data.auth_realm if data.auth_realm is not None else _legacy_realm()
+
+
+def _user_by_email_realm(db: Session, email: str, realm: str) -> User | None:
+    return (
+        db.query(User)
+        .filter(User.email == email, User.auth_realm == realm)
+        .first()
+    )
+
+
+def _token_subject(user: User) -> str:
+    """JWT sub is user id so the same email can exist on multiple auth realms."""
+    return str(user.id)
 
 
 @router.post("/google", response_model=TokenResponse)
@@ -148,9 +155,9 @@ def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
     if not email:
         raise HTTPException(status_code=400, detail="Google token missing email")
 
-    user = db.query(User).filter(User.email == email).first()
+    realm = payload.auth_realm if payload.auth_realm is not None else _legacy_realm()
+    user = _user_by_email_realm(db, email, realm)
     if not user:
-        realm = payload.auth_realm if payload.auth_realm is not None else _legacy_realm()
         user = User(
             email=email,
             name=name,
@@ -170,22 +177,23 @@ def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
             user.is_email_verified = True
             db.commit()
 
-    access = create_access_token(email)
-    refresh = create_refresh_token(email)
+    sub = _token_subject(user)
+    access = create_access_token(sub)
+    refresh = create_refresh_token(sub)
     return TokenResponse(access_token=access, refresh_token=refresh)
 
 
 @router.post("/register", response_model=TokenResponse)
 def register(data: RegisterRequest, db: Session = Depends(get_db)):
-    existing = db.query(User).filter(User.email == data.email).first()
     realm = _register_effective_realm(data)
+    existing = _user_by_email_realm(db, str(data.email), realm)
     if existing:
         if existing.password_hash:
             raise HTTPException(
                 status_code=409,
-                detail=_email_already_registered_detail(existing, realm),
+                detail="User already registered for this site. Please log in.",
             )
-        # If a user exists without a password hash, treat as incomplete legacy record.
+        # Incomplete signup row for this realm only — replace.
         db.delete(existing)
         db.commit()
 
@@ -218,8 +226,9 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
 
-    access = create_access_token(user.email)
-    refresh = create_refresh_token(user.email)
+    sub = _token_subject(user)
+    access = create_access_token(sub)
+    refresh = create_refresh_token(sub)
     return TokenResponse(access_token=access, refresh_token=refresh)
 
 
@@ -230,18 +239,16 @@ def request_otp(data: RegisterRequest, db: Session = Depends(get_db)):
     channel = _to_channel(data.channel)
     realm = _register_effective_realm(data)
 
-    user = db.query(User).filter(User.email == data.email).first()
+    user = _user_by_email_realm(db, str(data.email), realm)
     if user and _is_registration_complete(user) and user.password_hash:
-        raise HTTPException(status_code=409, detail=_email_already_registered_detail(user, realm))
+        raise HTTPException(
+            status_code=409,
+            detail="User already registered for this site. Please log in.",
+        )
 
     password_hash = hash_password(data.password)
     credit_union_id = _credit_union_id_from_signup_payload(db, data)
     if user:
-        if user.auth_realm and user.auth_realm != realm:
-            raise HTTPException(
-                status_code=409,
-                detail="Continue registration on the site where you started, or use a different email address.",
-            )
         user.name = data.name
         user.phone = data.phone
         user.password_hash = password_hash
@@ -307,7 +314,8 @@ def request_otp(data: RegisterRequest, db: Session = Depends(get_db)):
 @router.post("/otp/verify", response_model=TokenResponse)
 def verify_otp(data: RegisterVerifyRequest, db: Session = Depends(get_db)):
     channel = _to_channel(data.channel)
-    user = db.query(User).filter(User.email == data.email).first()
+    realm = _verify_effective_realm(data)
+    user = _user_by_email_realm(db, str(data.email), realm)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     if not user.password_hash:
@@ -353,33 +361,42 @@ def verify_otp(data: RegisterVerifyRequest, db: Session = Depends(get_db)):
             user.credit_union_id = cu.id
     db.commit()
 
-    access = create_access_token(user.email)
-    refresh = create_refresh_token(user.email)
+    sub = _token_subject(user)
+    access = create_access_token(sub)
+    refresh = create_refresh_token(sub)
     return TokenResponse(access_token=access, refresh_token=refresh)
 
 
 @router.post("/login", response_model=TokenResponse)
 def login(data: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == data.email).first()
-    if not user or not user.password_hash:
+    eff_realm = _login_effective_realm(data)
+    candidates = db.query(User).filter(User.email == data.email).all()
+    matches: list[User] = []
+    for u in candidates:
+        if not u.password_hash or not verify_password(data.password, u.password_hash):
+            continue
+        if login_realm_allows(u.auth_realm, data.auth_realm, _legacy_realm()) or _legacy_null_user_should_be_cu_realm(
+            u, data.auth_realm
+        ):
+            matches.append(u)
+    if not matches:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
-    if not verify_password(data.password, user.password_hash):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+    if len(matches) > 1:
+        exact = [u for u in matches if (u.auth_realm or "").strip() == eff_realm]
+        user = exact[0] if exact else matches[0]
+    else:
+        user = matches[0]
     if not _is_registration_complete(user):
         raise HTTPException(status_code=403, detail="Complete OTP verification before login")
 
-    if (
-        not login_realm_allows(user.auth_realm, data.auth_realm, _legacy_realm())
-        and not _legacy_null_user_should_be_cu_realm(user, data.auth_realm)
-    ):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
     if _legacy_null_user_should_be_cu_realm(user, data.auth_realm):
         # One-time auto-heal: persist realm so future logins are deterministic.
         user.auth_realm = AUTH_REALM_CARSCU
         db.commit()
 
-    access = create_access_token(user.email)
-    refresh = create_refresh_token(user.email)
+    sub = _token_subject(user)
+    access = create_access_token(sub)
+    refresh = create_refresh_token(sub)
     return TokenResponse(access_token=access, refresh_token=refresh)
 
 

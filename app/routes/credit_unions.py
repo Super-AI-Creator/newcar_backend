@@ -271,7 +271,7 @@ def admin_assign_credit_union_staff(
     email = (payload.email or "").strip().lower()
     if not email:
         raise HTTPException(status_code=400, detail="Email is required.")
-    target = db.query(User).filter(User.email == email).first()
+    target = db.query(User).filter(User.email == email, User.auth_realm == AUTH_REALM_CARSCU).first()
     if target:
         if target.role == UserRole.super_admin:
             raise HTTPException(

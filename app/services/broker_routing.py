@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
+from app.core.auth_realm import AUTH_REALM_CARSCU
 from app.core.config import settings
 from app.models.broker_message import BrokerMessage
 from app.models.enums import UserRole
@@ -20,7 +21,11 @@ def select_next_broker_admin_user_id(db: Session) -> int | None:
     if single:
         fixed = (
             db.query(User.id)
-            .filter(func.lower(func.trim(User.email)) == single, User.role == UserRole.broker_admin)
+            .filter(
+                func.lower(func.trim(User.email)) == single,
+                User.role == UserRole.broker_admin,
+                User.auth_realm == AUTH_REALM_CARSCU,
+            )
             .first()
         )
         if fixed:
@@ -32,7 +37,7 @@ def select_next_broker_admin_user_id(db: Session) -> int | None:
             func.max(BrokerMessage.created_at).label("last_assigned_at"),
         )
         .outerjoin(BrokerMessage, BrokerMessage.broker_admin_user_id == User.id)
-        .filter(User.role == UserRole.broker_admin)
+        .filter(User.role == UserRole.broker_admin, User.auth_realm == AUTH_REALM_CARSCU)
         .group_by(User.id)
         .order_by(
             case((func.max(BrokerMessage.created_at).is_(None), 0), else_=1).asc(),
