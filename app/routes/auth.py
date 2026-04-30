@@ -6,7 +6,7 @@ from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2 import id_token as google_id_token
 from sqlalchemy.orm import Session
 
-from app.core.auth_realm import AUTH_REALM_CARSCU, login_realm_allows
+from app.core.auth_realm import AUTH_REALM_CARSCU, AUTH_REALM_NEWCAR_SUPERSTORE, login_realm_allows
 from app.core.config import settings
 from app.core.deps import get_db, get_current_user
 from app.core.email import EmailDeliveryError, send_email
@@ -116,6 +116,22 @@ def _register_effective_realm(data: RegisterRequest) -> str:
     return data.auth_realm if data.auth_realm is not None else _legacy_realm()
 
 
+def _email_already_registered_detail(existing: User, requested_realm: str) -> str:
+    """409 body when email exists with a password — clearer if the account lives on the other public site."""
+    st = (existing.auth_realm or "").strip() or None
+    if st == AUTH_REALM_NEWCAR_SUPERSTORE and requested_realm == AUTH_REALM_CARSCU:
+        return (
+            "This email already has an account on New Car Superstore. "
+            "Sign in there with your password, or use a different email to register on carscu."
+        )
+    if st == AUTH_REALM_CARSCU and requested_realm == AUTH_REALM_NEWCAR_SUPERSTORE:
+        return (
+            "This email already has an account on carscu.com. "
+            "Sign in there with your password, or use a different email to register on New Car Superstore."
+        )
+    return "User already registered. Please log in."
+
+
 @router.post("/google", response_model=TokenResponse)
 def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
     try:
@@ -162,11 +178,12 @@ def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
 @router.post("/register", response_model=TokenResponse)
 def register(data: RegisterRequest, db: Session = Depends(get_db)):
     existing = db.query(User).filter(User.email == data.email).first()
+    realm = _register_effective_realm(data)
     if existing:
         if existing.password_hash:
             raise HTTPException(
                 status_code=409,
-                detail="User already registered. Please log in.",
+                detail=_email_already_registered_detail(existing, realm),
             )
         # If a user exists without a password hash, treat as incomplete legacy record.
         db.delete(existing)
@@ -182,7 +199,6 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
     else:
         credit_union_id = _credit_union_id_from_signup_payload(db, data)
 
-    realm = _register_effective_realm(data)
     user = User(
         email=data.email,
         phone=data.phone,
@@ -216,7 +232,7 @@ def request_otp(data: RegisterRequest, db: Session = Depends(get_db)):
 
     user = db.query(User).filter(User.email == data.email).first()
     if user and _is_registration_complete(user) and user.password_hash:
-        raise HTTPException(status_code=409, detail="User already registered. Please log in.")
+        raise HTTPException(status_code=409, detail=_email_already_registered_detail(user, realm))
 
     password_hash = hash_password(data.password)
     credit_union_id = _credit_union_id_from_signup_payload(db, data)
