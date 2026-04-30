@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.deps import get_current_user, get_db, require_role
 from app.models.document_submission import DocumentSubmission
 from app.models.user import User
+from app.services.cu_member_scope import resolve_member_scope_user_id
 
 router = APIRouter(prefix="/docs", tags=["docs"])
 
@@ -56,9 +57,11 @@ async def forward_docs(
     drivers_license: UploadFile = File(...),
     insurance: UploadFile = File(...),
     vin: Optional[str] = Form(None),
+    member_user_id: Optional[int] = Form(None),
     user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
     dl_bytes = await drivers_license.read()
     ins_bytes = await insurance.read()
 
@@ -73,7 +76,7 @@ async def forward_docs(
         raise HTTPException(status_code=415, detail="Unsupported file type. Upload PDF or image files only.")
 
     row = DocumentSubmission(
-        user_id=user.id,
+        user_id=scoped_user_id,
         vin=(vin or "").strip().upper() or None,
         status="submitted",
         drivers_license_filename=_sanitize_filename(drivers_license.filename, "drivers_license"),
@@ -96,7 +99,7 @@ def list_doc_submissions(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    user=Depends(require_role("broker_admin", "admin", "super_admin")),
+    user=Depends(require_role("broker_admin", "admin", "super_admin", "dealer")),
 ):
     _ = user
     query = db.query(DocumentSubmission).order_by(DocumentSubmission.created_at.desc())
@@ -128,14 +131,16 @@ def list_doc_submissions(
 @router.get("/mine")
 def list_my_doc_submissions(
     vin: Optional[str] = Query(None),
+    member_user_id: Optional[int] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
+    scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
     query = (
         db.query(DocumentSubmission)
-        .filter(DocumentSubmission.user_id == user.id)
+        .filter(DocumentSubmission.user_id == scoped_user_id)
         .order_by(DocumentSubmission.created_at.desc())
     )
     if vin and vin.strip():
@@ -143,7 +148,8 @@ def list_my_doc_submissions(
 
     total = query.count()
     rows = query.offset((page - 1) * page_size).limit(page_size).all()
-    items = [_serialize_doc_submission(row, customer=user) for row in rows]
+    scoped_customer = user if int(scoped_user_id) == int(user.id) else db.query(User).filter(User.id == scoped_user_id).first()
+    items = [_serialize_doc_submission(row, customer=scoped_customer) for row in rows]
     return {"items": items, "total": total}
 
 
@@ -152,7 +158,7 @@ def update_doc_submission(
     submission_id: int,
     payload: dict,
     db: Session = Depends(get_db),
-    user=Depends(require_role("broker_admin", "admin")),
+    user=Depends(require_role("broker_admin", "admin", "super_admin", "dealer")),
 ):
     row = db.query(DocumentSubmission).filter(DocumentSubmission.id == submission_id).first()
     if not row:
@@ -180,7 +186,7 @@ def download_doc_file(
     submission_id: int,
     kind: str,
     db: Session = Depends(get_db),
-    user=Depends(require_role("broker_admin", "admin", "super_admin")),
+    user=Depends(require_role("broker_admin", "admin", "super_admin", "dealer")),
 ):
     _ = user
     row = db.query(DocumentSubmission).filter(DocumentSubmission.id == submission_id).first()

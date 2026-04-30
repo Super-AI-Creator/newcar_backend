@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 from typing import Optional
 
@@ -10,6 +11,14 @@ from app.services.sheets_runner import SHEETS_SYNC_LOCK_NAME, run_sheets_sync_if
 logger = logging.getLogger(__name__)
 
 
+def _is_serverless_runtime() -> bool:
+    return bool(
+        os.getenv("VERCEL")
+        or os.getenv("AWS_LAMBDA_FUNCTION_NAME")
+        or os.getenv("AWS_EXECUTION_ENV")
+    )
+
+
 class SheetsSyncScheduler:
     def __init__(self) -> None:
         self._thread: Optional[threading.Thread] = None
@@ -19,6 +28,12 @@ class SheetsSyncScheduler:
     def start(self) -> None:
         if not settings.sheets_auto_sync_enabled:
             logger.info("Sheets auto-sync is disabled.")
+            return
+        if _is_serverless_runtime() and not settings.sheets_auto_sync_allow_serverless:
+            logger.info(
+                "Sheets auto-sync background scheduler is disabled in serverless runtime. "
+                "Use /webhooks/sheets-changed (cron/webhook) for sync triggers."
+            )
             return
         if self._thread and self._thread.is_alive():
             return

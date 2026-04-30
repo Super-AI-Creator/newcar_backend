@@ -161,9 +161,12 @@ def build_inventory_query(engine: Engine, filters: Dict[str, Any]):
     if vehicle_type_col is not None:
         vehicle_type_col = vehicle_type_col.label("vehicle_type")
     year_col = _coalesce(_column_or_none(canonical, "year"), _column_or_none(best_listing, "year"), "year")
-    make_col = _coalesce(_column_or_none(canonical, "make"), _column_or_none(best_listing, "make"), "make")
-    model_col = _coalesce(_column_or_none(canonical, "model"), _column_or_none(best_listing, "model"), "model")
-    trim_col = _coalesce(_column_or_none(canonical, "trim"), _column_or_none(best_listing, "trim"), "trim")
+    # Prefer live listing YMM over canonical: canonical rows can be stale or mis-joined,
+    # which previously produced wrong titles (e.g. filter make matching canonical while
+    # photos/VIN reflect the listing vehicle).
+    make_col = _coalesce(_column_or_none(best_listing, "make"), _column_or_none(canonical, "make"), "make")
+    model_col = _coalesce(_column_or_none(best_listing, "model"), _column_or_none(canonical, "model"), "model")
+    trim_col = _coalesce(_column_or_none(best_listing, "trim"), _column_or_none(canonical, "trim"), "trim")
     msrp_col = _coalesce(_column_or_none(canonical, "msrp"), _column_or_none(best_listing, "msrp"), "msrp")
     listed_price_col = _column_or_none(best_listing, "listed_price")
     mileage_col = _column_or_none(best_listing, "mileage")
@@ -198,6 +201,19 @@ def build_inventory_query(engine: Engine, filters: Dict[str, Any]):
     )
     if dealer_email_col is not None:
         dealer_email_col = dealer_email_col.label("dealer_email")
+    dealer_address_col = _first_available_column(
+        dealer_sources,
+        [
+            "address",
+            "street_address",
+            "dealer_address",
+            "physical_address",
+            "location",
+            "dealer_street",
+        ],
+    )
+    if dealer_address_col is not None:
+        dealer_address_col = dealer_address_col.label("dealer_address")
 
     sort_price_col = None
     if vehicle_type_col is not None:
@@ -226,6 +242,7 @@ def build_inventory_query(engine: Engine, filters: Dict[str, Any]):
         dealer_name_col,
         dealer_phone_col,
         dealer_email_col,
+        dealer_address_col,
         sort_price_col,
     ]:
         if col is not None:
@@ -274,16 +291,23 @@ def build_inventory_count_query(engine: Engine, filters: Dict[str, Any]):
     )
 
 
-def serialize_photos(raw: Any) -> List[str]:
+def is_feed_csv_listing(carfax_url: Any) -> bool:
+    """Feed-sourced rows use this sentinel; they may carry many more photo URLs than scraped listings."""
+    return str(carfax_url or "").strip().lower() == "feed_csv"
+
+
+def serialize_photos(raw: Any, *, max_photos: Optional[int] = 5) -> List[str]:
+    """Normalize photo list. Scraped listings are capped (default 5); pass max_photos=None for full feed lists."""
     if not raw:
         return []
     if isinstance(raw, list):
-        return raw[:5]
+        out = list(raw)
+        return out if max_photos is None else out[: max(0, int(max_photos))]
     if isinstance(raw, str):
         try:
             data = json.loads(raw)
             if isinstance(data, list):
-                return data[:5]
+                return data if max_photos is None else data[: max(0, int(max_photos))]
         except json.JSONDecodeError:
             return [raw]
     return []

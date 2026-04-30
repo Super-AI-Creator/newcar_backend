@@ -40,6 +40,7 @@ class InventoryItem(BaseModel):
     last_seen_at: Optional[str]
     dealer_name: Optional[str] = None
     dealer_phone: Optional[str] = None
+    dealer_address: Optional[str] = None
     listing_url: Optional[str] = None
     carfax_url: Optional[str] = None
     offer: Optional[OfferOverrideOut]

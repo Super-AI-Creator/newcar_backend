@@ -2,17 +2,21 @@
 import json
 import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_db
 from app.landing_footer_defaults import FOOTER_DISCLOSURE_DEFAULT
 from app.landing_slide_urls import normalize_hero_slide_urls_in_payload
 from app.models.landing_page_content import LandingPageContent
+from app.services.response_cache import get_shared_json, set_shared_json
 
 router = APIRouter(tags=["landing"])
 _LANDING_CACHE: dict[str, tuple[float, dict]] = {}
 _LANDING_CACHE_TTL_SECONDS = 60.0
+_EDGE_CACHE_HEADER_VALUE = "public, s-maxage=600, stale-while-revalidate=3600"
+_LANDING_SHARED_CACHE_NAMESPACE = "landing-page"
+_LANDING_SHARED_CACHE_TTL_SECONDS = 600
 
 
 def invalidate_landing_page_cache() -> None:
@@ -82,7 +86,8 @@ def _default_content() -> dict:
 
 
 @router.get("/landing-page")
-def get_landing_page(db: Session = Depends(get_db)):
+def get_landing_page(response: Response, db: Session = Depends(get_db)):
+    response.headers["Cache-Control"] = _EDGE_CACHE_HEADER_VALUE
     cache_key = "landing-page"
     now = time.time()
     cached = _LANDING_CACHE.get(cache_key)
@@ -90,6 +95,10 @@ def get_landing_page(db: Session = Depends(get_db)):
         expires_at, payload = cached
         if now < expires_at:
             return payload
+    shared_cached = get_shared_json(_LANDING_SHARED_CACHE_NAMESPACE, cache_key)
+    if isinstance(shared_cached, dict):
+        _LANDING_CACHE[cache_key] = (now + _LANDING_CACHE_TTL_SECONDS, shared_cached)
+        return shared_cached
 
     row = db.query(LandingPageContent).filter(LandingPageContent.id == 1).first()
     if not row or not row.content or not row.content.strip():
@@ -112,4 +121,5 @@ def get_landing_page(db: Session = Depends(get_db)):
         payload = {**payload, "hero": {**hero, "falling": _default_hero_falling()}}
     payload = normalize_hero_slide_urls_in_payload(payload)
     _LANDING_CACHE[cache_key] = (now + _LANDING_CACHE_TTL_SECONDS, payload)
+    set_shared_json(_LANDING_SHARED_CACHE_NAMESPACE, cache_key, payload, _LANDING_SHARED_CACHE_TTL_SECONDS)
     return payload
