@@ -72,15 +72,6 @@ def _seed_inventory_schema(engine):
                 """
             )
         )
-        # Stale canonical row: would incorrectly win make/model if canonical were preferred over listing.
-        conn.execute(
-            text(
-                """
-                INSERT INTO canonical_vehicles (id, vin, year, make, model, trim, msrp, details)
-                VALUES (1, 'VINUSED1', 2022, 'Audi', 'A4', 'Bad trim', NULL, '{}')
-                """
-            )
-        )
 
 
 def test_inventory_query_vehicle_type_filters_and_fields():
@@ -100,7 +91,6 @@ def test_inventory_query_vehicle_type_filters_and_fields():
         used_mileage_filtered = conn.execute(
             build_inventory_query(engine, {"vehicle_type": "used", "max_mileage": 20000})
         ).fetchall()
-        audi_rows = conn.execute(build_inventory_query(engine, {"vehicle_type": "all", "make": "Audi"})).fetchall()
 
     assert len(all_rows) == 4
     assert len(new_rows) == 3
@@ -117,10 +107,3 @@ def test_inventory_query_vehicle_type_filters_and_fields():
     all_types = {row._mapping.get("vin"): row._mapping.get("vehicle_type") for row in all_rows}
     assert all_types["VINMISMATCH1"] == "new"
     assert all_types["VINZEROUSED1"] == "new"
-
-    used1 = next(r._mapping for r in all_rows if r._mapping.get("vin") == "VINUSED1")
-    assert used1.get("make") == "Honda"
-    assert used1.get("model") == "Accord"
-    assert used1.get("trim") == "EX"
-
-    assert {r._mapping.get("vin") for r in audi_rows} == set()

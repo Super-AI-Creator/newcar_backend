@@ -1,28 +1,18 @@
 import logging
-from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user, get_db, require_role
 from app.models.broker_message import BrokerMessage
-from app.models.credit_union import CuMemberApproval
-from app.models.user import User
 from app.schemas.misc import BrokerMessageIn, BrokerReplyIn
-from app.services.broker_messages import (
-    encode_message_for_storage,
-    map_member_audience_to_sender_type,
-    parse_message_from_storage,
-    should_run_broker_customer_webhook,
-    should_sync_customer_message_to_ghl,
-)
+from app.services.broker_messages import encode_message_for_storage, parse_message_from_storage
 from app.services.ghl_deal_room import sync_deal_room_customer_message_to_ghl
 from app.services.broker_message_webhook import (
     is_broker_message_webhook_enabled,
     run_broker_customer_message_webhook_task,
 )
 from app.services.broker_routing import select_next_broker_admin_user_id
-from app.services.cu_member_scope import resolve_member_scope_user_id
 
 router = APIRouter(prefix="/broker", tags=["broker"])
 logger = logging.getLogger(__name__)
@@ -32,44 +22,31 @@ logger = logging.getLogger(__name__)
 def send_message(
     payload: BrokerMessageIn,
     background_tasks: BackgroundTasks,
-    member_user_id: Optional[int] = Query(None),
     user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
     assigned_broker_user_id = select_next_broker_admin_user_id(db)
-    member_sender = map_member_audience_to_sender_type(payload.audience)
     msg = BrokerMessage(
-        user_id=scoped_user_id,
+        user_id=user.id,
         vin=payload.vin,
-        message_text=encode_message_for_storage(payload.message_text, sender_type=member_sender),
+        message_text=encode_message_for_storage(payload.message_text, sender_type="customer"),
         broker_admin_user_id=assigned_broker_user_id,
     )
     db.add(msg)
     db.commit()
     db.refresh(msg)
-    message_user = user
-    if int(scoped_user_id) != int(user.id):
-        target_user = db.query(User).filter(User.id == int(scoped_user_id)).first()
-        if target_user is not None:
-            message_user = target_user
-    sender_type, body = parse_message_from_storage(msg.message_text or "")
     try:
-        if should_sync_customer_message_to_ghl(sender_type):
-            sync_deal_room_customer_message_to_ghl(user=message_user, message_text=body, vin=msg.vin)
+        _, body = parse_message_from_storage(msg.message_text or "")
+        sync_deal_room_customer_message_to_ghl(user=user, message_text=body, vin=msg.vin)
     except Exception:
         logger.exception("GHL deal room sync failed after save message_id=%s", msg.id)
-    if is_broker_message_webhook_enabled() and should_run_broker_customer_webhook(sender_type):
+    if is_broker_message_webhook_enabled():
         background_tasks.add_task(run_broker_customer_message_webhook_task, int(msg.id))
     return {"status": "sent", "broker_admin_user_id": assigned_broker_user_id}
 
 
 @router.post("/reply")
-def reply_to_customer(
-    payload: BrokerReplyIn,
-    user=Depends(require_role("broker_admin", "dealer")),
-    db: Session = Depends(get_db),
-):
+def reply_to_customer(payload: BrokerReplyIn, user=Depends(require_role("broker_admin")), db: Session = Depends(get_db)):
     msg = BrokerMessage(
         user_id=payload.customer_user_id,
         vin=payload.vin,
@@ -79,45 +56,3 @@ def reply_to_customer(
     db.add(msg)
     db.commit()
     return {"status": "sent", "broker_admin_user_id": user.id}
-
-
-@router.post("/cu-reply")
-def credit_union_reply_to_member(
-    payload: BrokerReplyIn,
-    user=Depends(require_role("credit_union")),
-    db: Session = Depends(get_db),
-):
-    """Staff message in the member's deal thread (same row store as dealer/member chat)."""
-    cu_id = getattr(user, "credit_union_id", None)
-    if not cu_id:
-        raise HTTPException(status_code=403, detail="No credit union assigned to this account.")
-    member_has_approval_link = (
-        db.query(CuMemberApproval)
-        .filter(
-            CuMemberApproval.user_id == int(payload.customer_user_id),
-            CuMemberApproval.credit_union_id == int(cu_id),
-        )
-        .first()
-    )
-    member_user = db.query(User).filter(User.id == int(payload.customer_user_id)).first()
-    member_assigned_to_cu = (
-        member_user is not None
-        and getattr(member_user, "credit_union_id", None) is not None
-        and int(getattr(member_user, "credit_union_id")) == int(cu_id)
-    )
-    if not member_has_approval_link and not member_assigned_to_cu:
-        raise HTTPException(
-            status_code=403,
-            detail="That member is not linked to your credit union.",
-        )
-    assigned_broker_user_id = select_next_broker_admin_user_id(db)
-    msg = BrokerMessage(
-        user_id=payload.customer_user_id,
-        vin=payload.vin,
-        message_text=encode_message_for_storage(payload.message_text, sender_type="credit_union"),
-        broker_admin_user_id=assigned_broker_user_id,
-    )
-    db.add(msg)
-    db.commit()
-    db.refresh(msg)
-    return {"status": "sent", "id": int(msg.id)}

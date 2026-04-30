@@ -1,18 +1,15 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user, get_db, require_role
-from app.models.credit_union import CreditUnion, CuMemberApproval
 from app.models.deal import Deal
 from app.models.deal_event import DealEvent
 from app.models.enums import DealStatus
 from app.models.user import User
 from app.schemas.deals import DealCreateIn, DealEventOut, DealOut, DealUpdateIn
-from app.services.cu_member_scope import resolve_member_scope_user_id
-from app.services.lead_delivery import send_lead_webhook
 
 router = APIRouter(prefix="/deals", tags=["deals"])
 
@@ -47,49 +44,7 @@ def _serialize_deal(row: Deal) -> DealOut:
         delivered_at=str(row.delivered_at) if row.delivered_at else None,
         created_at=str(row.created_at) if row.created_at else None,
         updated_at=str(row.updated_at) if row.updated_at else None,
-        credit_union_id=int(row.credit_union_id) if getattr(row, "credit_union_id", None) is not None else None,
     )
-
-
-def _batch_cu_approval_maps(db: Session, rows: list) -> tuple[dict, dict]:
-    cu_ids = {int(r.credit_union_id) for r in rows if getattr(r, "credit_union_id", None) is not None}
-    ap_ids = {int(r.cu_approval_id) for r in rows if getattr(r, "cu_approval_id", None) is not None}
-    cu_map = {int(c.id): c for c in db.query(CreditUnion).filter(CreditUnion.id.in_(cu_ids)).all()} if cu_ids else {}
-    ap_map = {
-        int(a.id): a for a in db.query(CuMemberApproval).filter(CuMemberApproval.id.in_(ap_ids)).all()
-    } if ap_ids else {}
-    return cu_map, ap_map
-
-
-def _deal_dict_with_cu(
-    db: Session,
-    row: Deal,
-    cu_map: Optional[dict] = None,
-    ap_map: Optional[dict] = None,
-) -> dict:
-    if cu_map is None or ap_map is None:
-        cu_map, ap_map = _batch_cu_approval_maps(db, [row])
-    d = _serialize_deal(row).dict()
-    cu_id = getattr(row, "credit_union_id", None)
-    ap_id = getattr(row, "cu_approval_id", None)
-    cu = cu_map.get(int(cu_id)) if cu_id is not None else None
-    ap = ap_map.get(int(ap_id)) if ap_id is not None else None
-    d["credit_union_name"] = cu.name if cu else None
-    d["approval_amount"] = float(ap.loan_amount) if ap is not None and ap.loan_amount is not None else None
-    return d
-
-
-def _deals_list_items(
-    db: Session,
-    rows: list,
-    cu_map: Optional[dict] = None,
-    ap_map: Optional[dict] = None,
-) -> list:
-    if not rows:
-        return []
-    if cu_map is None or ap_map is None:
-        cu_map, ap_map = _batch_cu_approval_maps(db, rows)
-    return [_deal_dict_with_cu(db, r, cu_map, ap_map) for r in rows]
 
 
 def _serialize_event(row: DealEvent) -> DealEventOut:
@@ -132,19 +87,12 @@ def _parse_optional_datetime(value: Optional[str]) -> Optional[datetime]:
 
 
 @router.post("", response_model=DealOut)
-def create_deal(
-    payload: DealCreateIn,
-    member_user_id: Optional[int] = Query(None),
-    background_tasks: BackgroundTasks = None,
-    user=Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
+def create_deal(payload: DealCreateIn, user=Depends(get_current_user), db: Session = Depends(get_db)):
     vin = payload.vin.strip().upper()
     existing = (
         db.query(Deal)
         .filter(
-            Deal.user_id == scoped_user_id,
+            Deal.user_id == user.id,
             Deal.vin == vin,
             Deal.status.in_(
                 [
@@ -160,28 +108,14 @@ def create_deal(
         .first()
     )
     if existing:
-        return _deal_dict_with_cu(db, existing)
+        return _serialize_deal(existing)
 
     row = Deal(
-        user_id=scoped_user_id,
+        user_id=user.id,
         vin=vin,
         status=DealStatus.inquiry,
         customer_note=payload.customer_note.strip() if payload.customer_note else None,
     )
-
-    # Attach latest active/pending CU approval for this user, if any.
-    approval = (
-        db.query(CuMemberApproval)
-        .filter(
-            CuMemberApproval.user_id == scoped_user_id,
-            CuMemberApproval.status.in_(["pending", "active", "funded"]),
-        )
-        .order_by(CuMemberApproval.created_at.desc())
-        .first()
-    )
-    if approval:
-        row.credit_union_id = approval.credit_union_id
-        row.cu_approval_id = approval.id
     db.add(row)
     db.flush()
     _log_event(
@@ -193,34 +127,16 @@ def create_deal(
     )
     db.commit()
     db.refresh(row)
-    if background_tasks is not None:
-        background_tasks.add_task(
-            send_lead_webhook,
-            {
-                "event": "deal.created",
-                "deal_id": int(row.id),
-                "user_id": int(row.user_id),
-                "vin": row.vin,
-                "status": row.status.value if hasattr(row.status, "value") else str(row.status),
-                "customer_note": row.customer_note,
-                "customer_email": getattr(user, "email", None),
-                "customer_name": getattr(user, "name", None),
-                "source": "deal_creation",
-                "created_at": str(row.created_at) if row.created_at else None,
-            },
-        )
-    return _deal_dict_with_cu(db, row)
+    return _serialize_deal(row)
 
 
 @router.get("/mine")
 def list_my_deals(
     status: Optional[str] = Query(None),
-    member_user_id: Optional[int] = Query(None),
     user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
-    query = db.query(Deal).filter(Deal.user_id == scoped_user_id)
+    query = db.query(Deal).filter(Deal.user_id == user.id)
     if status:
         try:
             status_enum = DealStatus(status)
@@ -228,7 +144,7 @@ def list_my_deals(
             raise HTTPException(status_code=400, detail="Invalid status") from exc
         query = query.filter(Deal.status == status_enum)
     rows = query.order_by(Deal.updated_at.desc(), Deal.created_at.desc()).all()
-    return {"items": _deals_list_items(db, rows)}
+    return {"items": [_serialize_deal(row).dict() for row in rows]}
 
 
 @router.get("")
@@ -246,7 +162,7 @@ def list_all_deals(
             raise HTTPException(status_code=400, detail="Invalid status") from exc
         query = query.filter(Deal.status == status_enum)
     rows = query.order_by(Deal.updated_at.desc(), Deal.created_at.desc()).limit(500).all()
-    return {"items": _deals_list_items(db, rows)}
+    return {"items": [_serialize_deal(row).dict() for row in rows]}
 
 
 @router.patch("/{deal_id}", response_model=DealOut)
@@ -352,7 +268,7 @@ def update_deal(
 
     db.commit()
     db.refresh(row)
-    return _deal_dict_with_cu(db, row)
+    return _serialize_deal(row)
 
 
 @router.get("/{deal_id}/events")
@@ -406,27 +322,14 @@ def broker_queue(
     users = db.query(User).filter(User.id.in_(user_ids)).all() if user_ids else []
     user_map = {int(u.id): u for u in users}
 
-    cu_map, ap_map = _batch_cu_approval_maps(db, rows)
-    items = _deals_list_items(db, rows, cu_map, ap_map)
-    for i, row in enumerate(rows):
-        deal = items[i]
+    items = []
+    for row in rows:
         customer = user_map.get(int(row.user_id))
-        assigned_broker = (
-            user_map.get(int(row.assigned_broker_user_id)) if row.assigned_broker_user_id is not None else None
-        )
-        cu = cu_map.get(int(row.credit_union_id)) if getattr(row, "credit_union_id", None) is not None else None
-
-        if cu:
-            # CU deal: mask email/phone, keep only first name
-            first_name = (customer.name or "").split()[0] if customer and customer.name else None
-            deal["customer_name"] = first_name
-            deal["customer_email"] = None
-            deal["customer_phone"] = None
-        else:
-            deal["customer_name"] = customer.name if customer else None
-            deal["customer_email"] = customer.email if customer else None
-            deal["customer_phone"] = customer.phone if customer else None
-
+        assigned_broker = user_map.get(int(row.assigned_broker_user_id)) if row.assigned_broker_user_id is not None else None
+        deal = _serialize_deal(row).dict()
+        deal["customer_name"] = customer.name if customer else None
+        deal["customer_email"] = customer.email if customer else None
+        deal["customer_phone"] = customer.phone if customer else None
         deal["assigned_broker_email"] = assigned_broker.email if assigned_broker else None
         deal["assigned_broker_name"] = assigned_broker.name if assigned_broker else None
         items.append(deal)

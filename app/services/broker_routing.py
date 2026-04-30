@@ -3,7 +3,6 @@ from __future__ import annotations
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.models.broker_message import BrokerMessage
 from app.models.enums import UserRole
 from app.models.user import User
@@ -11,21 +10,9 @@ from app.models.user import User
 
 def select_next_broker_admin_user_id(db: Session) -> int | None:
     """
-    When BROKER_SINGLE_ASSIGN_EMAIL is set and matches a broker_admin user, always assign to them
-    (default deal-room routing, e.g. Power Auto Buying / chris@carscu.com).
-
-    Otherwise: round-robin by least-recently-assigned broker_admin.
+    Round-robin assignment by least-recently-assigned broker.
+    Brokers with no prior assignments are selected first.
     """
-    single = (settings.broker_single_assign_email or "").strip().lower()
-    if single:
-        fixed = (
-            db.query(User.id)
-            .filter(func.lower(func.trim(User.email)) == single, User.role == UserRole.broker_admin)
-            .first()
-        )
-        if fixed:
-            return int(fixed[0])
-
     rows = (
         db.query(
             User.id,

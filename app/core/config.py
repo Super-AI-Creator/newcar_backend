@@ -1,9 +1,7 @@
 from typing import Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-from app.core.auth_realm import ALLOWED_AUTH_REALMS
 
 
 class Settings(BaseSettings):
@@ -40,9 +38,6 @@ class Settings(BaseSettings):
     scores_sheet_id: Optional[str] = Field(None)
     scores_sheet_tab: Optional[str] = Field(None)
     sheets_auto_sync_enabled: bool = Field(False)
-    # In serverless (Vercel/Lambda), background threads are not reliable and can create lock noise.
-    # Keep disabled by default unless explicitly enabled.
-    sheets_auto_sync_allow_serverless: bool = Field(False)
     sheets_auto_sync_interval_minutes: int = Field(10)
     sheets_auto_sync_run_on_startup: bool = Field(True)
     sheets_auto_sync_lock_wait_seconds: int = Field(20)
@@ -53,8 +48,6 @@ class Settings(BaseSettings):
     lead_webhook_timeout_seconds: int = Field(10)
     lead_webhook_max_attempts: int = Field(3)
     lead_webhook_retry_backoff_seconds: float = Field(1.0)
-    # Trade-in lead notification inbox (defaults to broker_email when empty).
-    trade_in_notify_email: Optional[str] = Field(None)
     credit_application_webhook_url: Optional[str] = Field(None)
     credit_application_webhook_secret: Optional[str] = Field(None)
     credit_application_webhook_timeout_seconds: int = Field(15)
@@ -85,42 +78,6 @@ class Settings(BaseSettings):
     twilio_auth_token: Optional[str] = Field(None)
     twilio_from_phone: Optional[str] = Field(None)
     frontend_base_url: str = Field("https://newcarsuperstore.com")
-    # Optional comma-separated CORS origins for manage_backend.
-    cors_origins: Optional[str] = Field(None)
-    # Optional comma-separated list of extra origins for the standalone CU API.
-    # Parsed by credit_union_platform/backend/main.py.
-    cu_cors_origins: Optional[str] = Field(None)
-    # When set, CU white-label portal and approval claim/invite/join links prefer this base.
-    # Fallback is frontend_base_url when this is empty.
-    cu_portal_base_url: Optional[str] = Field(None)
-    # Marketing demo form on CU landing: notify this address (default chris@carscu.com).
-    cu_demo_contact_notify_email: str = Field("chris@carscu.com")
-    # CU pre-approval / member reminder emails: optional From override (e.g. noreply@carscu.com). Must be allowed by your SMTP/Resend domain.
-    cu_approval_from_email: Optional[str] = Field(None)
-    # When true (and cu_approval_from_email is unset), use each credit union's contact_email as From when present.
-    cu_approval_from_cu_contact: bool = Field(False)
-    # Per client IP (or X-Forwarded-For) sliding-window cap for POST /public/cu-demo-contact.
-    cu_demo_contact_rate_limit_per_minute: int = Field(8, ge=1, le=120)
-    # When set, member/broker deal-room messages assign to this broker_admin user only (e.g. Power Auto Buying).
-    broker_single_assign_email: Optional[str] = Field(None)
-    # Optional shared response cache (Upstash Redis REST-compatible).
-    cache_rest_url: Optional[str] = Field(None)
-    cache_rest_token: Optional[str] = Field(None)
-    cache_default_ttl_seconds: int = Field(600, ge=30, le=86400)
-    # Warm critical inventory caches on backend startup (search + lease-specials first paint).
-    inventory_startup_warmup_enabled: bool = Field(True)
-    inventory_startup_warmup_delay_seconds: int = Field(2, ge=0, le=300)
-    # Users with NULL auth_realm (pre-migration) may only authenticate when the client resolves to this realm.
-    # Default newcar_superstore: legacy rows sign in on NewCarSuperstore, not on carscu.com.
-    auth_realm_legacy_default: str = Field("newcar_superstore")
-
-    @field_validator("auth_realm_legacy_default")
-    @classmethod
-    def _validate_auth_realm_legacy_default(cls, v: str) -> str:
-        s = (v or "newcar_superstore").strip()
-        if s not in ALLOWED_AUTH_REALMS:
-            raise ValueError(f"auth_realm_legacy_default must be one of: {', '.join(sorted(ALLOWED_AUTH_REALMS))}")
-        return s
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 

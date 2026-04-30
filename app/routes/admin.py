@@ -6,11 +6,10 @@ import json
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from sqlalchemy import case, func, or_, select, true
 from sqlalchemy.orm import Session
 
-from app.core.auth_realm import AUTH_REALM_CARSCU
 from app.core.config import settings
 from app.core.database import engine
 from app.core.deps import get_db, require_role
@@ -35,8 +34,6 @@ from app.models.landing_page_content import LandingPageContent
 from app.models.sheet_sources_meta import SheetSourceMeta
 from app.models.testimonial import Testimonial
 from app.models.article import Article
-from app.models.credit_union import CreditUnion
-from app.models.dealer_dashboard_setting import DealerDashboardSetting
 from app.models.user import User
 from app.schemas.user import UserOut
 from app.services.cloudinary import CloudinaryUploadError, cloudinary_is_configured, upload_image_to_cloudinary
@@ -62,7 +59,7 @@ _MANUAL_PHOTO_UPLOAD_DIR = Path(__file__).resolve().parents[2] / "uploads" / "ma
 
 
 @router.get("/sources")
-def sources(db: Session = Depends(get_db), user=Depends(require_role("broker_admin", "super_admin"))):
+def sources(db: Session = Depends(get_db), user=Depends(require_role("broker_admin"))):
     tables = load_legacy_tables(engine)
     dealer_sources = tables["dealer_sources"]
     query = select(dealer_sources)
@@ -74,62 +71,6 @@ def sources(db: Session = Depends(get_db), user=Depends(require_role("broker_adm
         results.append({k: v for k, v in mapping.items()})
 
     return {"items": results}
-
-
-def _serialize_dealer_source_row(mapping: dict) -> dict:
-    out = {}
-    for k, v in mapping.items():
-        if hasattr(v, "isoformat"):
-            out[k] = v.isoformat()
-        else:
-            out[k] = v
-    return out
-
-
-@router.get("/dealer-sources")
-def admin_dealer_sources_with_dashboard_flags(
-    db: Session = Depends(get_db),
-    user=Depends(require_role("super_admin")),
-):
-    _ = user
-    tables = load_legacy_tables(engine)
-    dealer_sources = tables["dealer_sources"]
-    rows = db.execute(select(dealer_sources)).fetchall()
-    settings_map = {int(r.dealer_source_id): bool(r.dashboard_activated) for r in db.query(DealerDashboardSetting).all()}
-    results = []
-    for row in rows:
-        m = _serialize_dealer_source_row(dict(row._mapping))
-        sid = m.get("id")
-        try:
-            sid_int = int(sid) if sid is not None else None
-        except (TypeError, ValueError):
-            sid_int = None
-        m["dashboard_activated"] = bool(settings_map.get(sid_int, False)) if sid_int is not None else False
-        results.append(m)
-    return {"items": results}
-
-
-class DealerDashboardPatch(BaseModel):
-    dashboard_activated: bool
-
-
-@router.put("/dealer-sources/{source_id}/dashboard")
-def admin_put_dealer_dashboard_setting(
-    source_id: int,
-    payload: DealerDashboardPatch,
-    db: Session = Depends(get_db),
-    user=Depends(require_role("super_admin")),
-):
-    _ = user
-    row = db.query(DealerDashboardSetting).filter(DealerDashboardSetting.dealer_source_id == source_id).first()
-    if not row:
-        row = DealerDashboardSetting(dealer_source_id=source_id, dashboard_activated=bool(payload.dashboard_activated))
-        db.add(row)
-    else:
-        row.dashboard_activated = bool(payload.dashboard_activated)
-    db.commit()
-    db.refresh(row)
-    return {"ok": True, "dealer_source_id": source_id, "dashboard_activated": row.dashboard_activated}
 
 
 @router.post("/sync-sheets")
@@ -321,35 +262,6 @@ def _table_col(table, *candidates: str):
     return None
 
 
-def _mapping_col_value(mapping: dict, column) -> Optional[Any]:
-    if column is None:
-        return None
-    key = getattr(column, "key", None)
-    if not key:
-        return None
-    return mapping.get(key)
-
-
-def _serialize_general_status_cell(value: Any) -> Optional[Any]:
-    if value is None:
-        return None
-    if hasattr(value, "isoformat"):
-        try:
-            return value.isoformat()
-        except Exception:
-            return str(value)
-    return value
-
-
-def _truncate_display_text(value: Any, max_len: int = 56) -> Optional[str]:
-    if value is None:
-        return None
-    s = str(value).strip()
-    if not s:
-        return None
-    return s if len(s) <= max_len else f"{s[: max_len - 1]}…"
-
-
 def _truthy_filter(column):
     if column is None:
         return true()
@@ -427,7 +339,6 @@ def general_status(
     dealer_name_col = _table_col(dealer_sources, "dealer_name", "name", "brand", "website_url")
     active_dealer_names: list[str] = []
     active_source_ids: list[int] = []
-    dealer_items: list[dict] = []
 
     if "id" in dealer_sources.c:
         active_source_ids = [
@@ -438,58 +349,14 @@ def general_status(
             if row and row[0] is not None
         ]
 
-    vehicle_type_src_col = _table_col(dealer_sources, "vehicle_type")
-    scrape_method_col = _table_col(dealer_sources, "scrape_method")
-    last_scrape_status_col = _table_col(dealer_sources, "last_scrape_status", "status", "source_status")
-    website_src_col = _table_col(dealer_sources, "website_url", "inventory_url")
-    updated_src_col = _table_col(dealer_sources, "updated_at", "last_success_at")
-    brand_src_col = _table_col(dealer_sources, "brand")
-
-    order_by_cols = []
     if dealer_name_col is not None:
-        order_by_cols.append(dealer_name_col.asc())
-    elif "id" in dealer_sources.c:
-        order_by_cols.append(dealer_sources.c.id.asc())
-
-    active_sources_stmt = select(dealer_sources).where(active_source_filter)
-    if order_by_cols:
-        active_sources_stmt = active_sources_stmt.order_by(*order_by_cols)
-    active_source_rows = db.execute(active_sources_stmt).fetchall()
-
-    for row in active_source_rows:
-        m = dict(row._mapping)
-        sid = m.get("id")
-        sid_int: Optional[int] = None
-        if sid is not None:
-            try:
-                sid_int = int(sid)
-            except (TypeError, ValueError):
-                sid_int = None
-
-        name = ""
-        if dealer_name_col is not None:
-            nv = _mapping_col_value(m, dealer_name_col)
-            if nv is not None:
-                name = str(nv).strip()
-        if not name and brand_src_col is not None:
-            bv = _mapping_col_value(m, brand_src_col)
-            if bv is not None:
-                name = str(bv).strip()
-
-        dealer_items.append(
-            {
-                "id": sid_int if sid_int is not None else sid,
-                "name": name or None,
-                "brand": _serialize_general_status_cell(_mapping_col_value(m, brand_src_col)),
-                "vehicle_type": _serialize_general_status_cell(_mapping_col_value(m, vehicle_type_src_col)),
-                "scrape_method": _serialize_general_status_cell(_mapping_col_value(m, scrape_method_col)),
-                "last_scrape_status": _serialize_general_status_cell(_mapping_col_value(m, last_scrape_status_col)),
-                "website_url": _truncate_display_text(_mapping_col_value(m, website_src_col), 64),
-                "updated_at": _serialize_general_status_cell(_mapping_col_value(m, updated_src_col)),
-            }
-        )
-
-    active_dealer_names = sorted({str(d["name"]).strip() for d in dealer_items if d.get("name")})
+        name_rows = db.execute(
+            select(dealer_name_col)
+            .where(active_source_filter, dealer_name_col.is_not(None), func.trim(dealer_name_col) != "")
+            .distinct()
+            .order_by(dealer_name_col.asc())
+        ).fetchall()
+        active_dealer_names = [str(row[0]).strip() for row in name_rows if row and row[0]]
 
     listing_filters = [_active_listing_filter(listings)]
     if "vin" in listings.c:
@@ -537,9 +404,8 @@ def general_status(
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "dealers": {
-            "active_count": len(dealer_items),
+            "active_count": len(active_dealer_names),
             "names": active_dealer_names,
-            "items": dealer_items,
         },
         "vehicles": {
             "active_new_count": int(vehicle_counts["new"]),
@@ -649,10 +515,6 @@ class ManualVehicleUpsert(BaseModel):
     discounted_price: Optional[float] = None
     term_months: Optional[int] = None
     miles_per_year: Optional[int] = None
-
-
-class ManualVehiclesBulkDeletePayload(BaseModel):
-    vins: list[str] = []
 
 
 class SeoPageSettingUpsert(BaseModel):
@@ -938,42 +800,6 @@ def delete_manual_vehicle(
     db.delete(row)
     db.commit()
     return {"deleted": True, "vin": normalized_vin}
-
-
-@router.post("/manual-vehicles/bulk-delete")
-def bulk_delete_manual_vehicles(
-    payload: ManualVehiclesBulkDeletePayload,
-    db: Session = Depends(get_db),
-    user=Depends(require_role("super_admin")),
-):
-    _ = user
-    normalized_vins: list[str] = []
-    seen: set[str] = set()
-    for vin in payload.vins:
-        normalized = _normalize_vin(vin)
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        normalized_vins.append(normalized)
-
-    if not normalized_vins:
-        raise HTTPException(status_code=400, detail="At least one VIN is required.")
-
-    rows = db.query(ManualVehicle).filter(ManualVehicle.vin.in_(normalized_vins)).all()
-    found_vins = {row.vin for row in rows if row.vin}
-    deleted_vins: list[str] = []
-    for row in rows:
-        deleted_vins.append(row.vin)
-        db.delete(row)
-    db.commit()
-
-    not_found_vins = [vin for vin in normalized_vins if vin not in found_vins]
-    return {
-        "requested_count": len(normalized_vins),
-        "deleted_count": len(deleted_vins),
-        "deleted_vins": deleted_vins,
-        "not_found_vins": not_found_vins,
-    }
 
 
 @router.get("/seo-settings")
@@ -1280,77 +1106,17 @@ def admin_upsert_landing_page(
 
 @router.get("/users", response_model=list[UserOut])
 def admin_list_users(
-    role: Optional[str] = Query(None),
-    limit: int = Query(500, ge=1, le=2000),
     db: Session = Depends(get_db),
     user=Depends(require_role("super_admin")),
 ):
     _ = user
-    q = db.query(User, CreditUnion.name).outerjoin(CreditUnion, User.credit_union_id == CreditUnion.id)
-    if role and role.strip():
-        role_clean = role.strip().lower()
-        try:
-            q = q.filter(User.role == UserRole(role_clean))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="Invalid role filter.") from exc
-    rows = q.order_by(User.created_at.desc(), User.id.desc()).limit(limit).all()
-    out: list[UserOut] = []
-    for u, cu_name in rows:
-        base = UserOut.model_validate(u)
-        out.append(base.model_copy(update={"credit_union_name": cu_name}))
-    return out
-
-
-class AdminUserCreate(BaseModel):
-    email: EmailStr
-    name: str
-    password: str
-    role: str
-    credit_union_id: Optional[int] = None
-
-
-@router.post("/users", response_model=UserOut)
-def admin_create_user(
-    payload: AdminUserCreate,
-    db: Session = Depends(get_db),
-    current=Depends(require_role("super_admin")),
-):
-    _ = current
-    try:
-        role_enum = UserRole(payload.role.strip().lower())
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Invalid role.") from exc
-    if role_enum == UserRole.credit_union and not payload.credit_union_id:
-        raise HTTPException(status_code=400, detail="credit_union role requires credit_union_id.")
-    email = str(payload.email).strip().lower()
-    if db.query(User).filter(User.email == email).first():
-        raise HTTPException(status_code=400, detail="A user with this email already exists.")
-    pwd = (payload.password or "").strip()
-    if len(pwd) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
-    name = (payload.name or "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="Name is required.")
-    row = User(
-        email=email,
-        name=name,
-        role=role_enum,
-        password_hash=hash_password(pwd),
-        credit_union_id=payload.credit_union_id,
-        phone=None,
-        auth_realm=AUTH_REALM_CARSCU,
-        is_email_verified=True,
-        is_phone_verified=False,
+    rows = (
+        db.query(User)
+        .order_by(User.created_at.desc(), User.id.desc())
+        .limit(500)
+        .all()
     )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    cu_name = None
-    if row.credit_union_id:
-        cu = db.query(CreditUnion).filter(CreditUnion.id == row.credit_union_id).first()
-        cu_name = cu.name if cu else None
-    base = UserOut.model_validate(row)
-    return base.model_copy(update={"credit_union_name": cu_name})
+    return [UserOut.model_validate(row) for row in rows]
 
 
 class AdminUserUpdate(BaseModel):

@@ -15,27 +15,14 @@ from app.services.credit_application_delivery import notify_credit_application_s
 from app.services.credit_application_format import enrich_payload_with_formatted
 from app.models.offer_override import OfferOverride
 from app.models.user import User
-from app.services.cu_member_scope import resolve_member_scope_user_id
-from app.services.broker_messages import (
-    encode_message_for_storage,
-    map_member_audience_to_sender_type,
-    parse_message_from_storage,
-    should_run_broker_customer_webhook,
-    should_sync_customer_message_to_ghl,
-)
+from app.services.broker_messages import encode_message_for_storage, parse_message_from_storage
 from app.services.ghl_deal_room import sync_deal_room_customer_message_to_ghl
 from app.services.broker_message_webhook import (
     is_broker_message_webhook_enabled,
     run_broker_customer_message_webhook_task,
 )
 from app.services.broker_routing import select_next_broker_admin_user_id
-from app.services.legacy_tables import (
-    build_inventory_count_query,
-    build_inventory_query,
-    is_feed_csv_listing,
-    load_legacy_tables,
-    serialize_photos,
-)
+from app.services.legacy_tables import build_inventory_count_query, build_inventory_query, load_legacy_tables, serialize_photos
 
 router = APIRouter(tags=["frontend-compat"])
 logger = logging.getLogger(__name__)
@@ -78,16 +65,13 @@ def _dealer_source_ids(db: Session, user_email: str) -> list[int]:
 
 @router.get("/messages")
 def list_messages(
-    member_user_id: Optional[int] = Query(None),
     user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     role_value = user.role.value if hasattr(user.role, "value") else str(user.role)
-    scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
     query = db.query(BrokerMessage)
-    elevated_inbox = {"broker_admin", "admin", "super_admin", "dealer"}
-    if role_value not in elevated_inbox or member_user_id is not None:
-        query = query.filter(BrokerMessage.user_id == scoped_user_id)
+    if role_value not in {"broker_admin", "admin"}:
+        query = query.filter(BrokerMessage.user_id == user.id)
     rows = query.order_by(BrokerMessage.created_at.desc()).all()
     broker_user_ids = sorted(
         {
@@ -106,38 +90,12 @@ def list_messages(
         sender_type, body = parse_message_from_storage(row.message_text)
         broker_user = broker_map.get(int(row.broker_admin_user_id)) if row.broker_admin_user_id is not None else None
         customer_user = customer_map.get(int(row.user_id)) if row.user_id is not None else None
-        if sender_type in ("customer", "customer_cu", "customer_broker"):
-            is_member_viewing_self = (
-                role_value == "customer"
-                and member_user_id is None
-                and row.user_id is not None
-                and int(row.user_id) == int(scoped_user_id)
-            )
-            if is_member_viewing_self:
-                sender_label = "You"
-            else:
-                sender_label = (
-                    (customer_user.name if customer_user and customer_user.name else None)
-                    or (customer_user.email if customer_user else None)
-                    or "Member"
-                )
-        elif sender_type == "broker":
-            sender_label = (
-                (broker_user.name if broker_user and broker_user.name else None)
-                or (broker_user.email if broker_user else None)
-                or "Dealer"
-            )
-        elif sender_type == "credit_union":
-            sender_label = "Credit Union"
-        else:
-            sender_label = "Member"
         items.append(
             {
                 "id": str(row.id),
                 "vin": row.vin,
                 "body": body,
                 "senderType": sender_type,
-                "senderLabel": sender_label,
                 "createdAt": str(row.created_at) if row.created_at else None,
                 "userId": str(row.user_id) if row.user_id is not None else None,
                 "customerName": customer_user.name if customer_user else None,
@@ -161,32 +119,22 @@ def send_message_compat(
         raise HTTPException(status_code=400, detail="message is required")
 
     vin = (payload or {}).get("vin")
-    member_user_id = (payload or {}).get("member_user_id")
-    raw_audience = (payload or {}).get("audience")
-    audience = raw_audience if isinstance(raw_audience, str) else "both"
-    member_sender = map_member_audience_to_sender_type(audience)
-    scoped_user_id = resolve_member_scope_user_id(
-        db,
-        user,
-        int(member_user_id) if isinstance(member_user_id, (int, str)) and str(member_user_id).strip().isdigit() else None,
-    )
     assigned_broker_user_id = select_next_broker_admin_user_id(db)
     msg = BrokerMessage(
-        user_id=scoped_user_id,
+        user_id=user.id,
         vin=vin,
-        message_text=encode_message_for_storage(message_text, sender_type=member_sender),
+        message_text=encode_message_for_storage(message_text, sender_type="customer"),
         broker_admin_user_id=assigned_broker_user_id,
     )
     db.add(msg)
     db.commit()
     db.refresh(msg)
-    sender_type, body = parse_message_from_storage(msg.message_text or "")
     try:
-        if should_sync_customer_message_to_ghl(sender_type):
-            sync_deal_room_customer_message_to_ghl(user=user, message_text=body, vin=vin)
+        _, body = parse_message_from_storage(msg.message_text or "")
+        sync_deal_room_customer_message_to_ghl(user=user, message_text=body, vin=vin)
     except Exception:
         logger.exception("GHL deal room sync failed after save message_id=%s", msg.id)
-    if is_broker_message_webhook_enabled() and should_run_broker_customer_webhook(sender_type):
+    if is_broker_message_webhook_enabled():
         background_tasks.add_task(run_broker_customer_message_webhook_task, int(msg.id))
     return {"sent": True, "broker_admin_user_id": assigned_broker_user_id}
 
@@ -199,7 +147,7 @@ def credit_application_compat(
 ):
     raw = payload if isinstance(payload, dict) else {}
     vin = raw.get("vin")
-    merged = enrich_payload_with_formatted(raw, mask_sensitive=False)
+    merged = enrich_payload_with_formatted(raw, mask_sensitive=True)
     row = CreditApplication(
         user_id=user.id,
         vin=vin,
@@ -263,10 +211,7 @@ def dealer_inventory(
             "listed_price": _to_float(m.get("listed_price")),
             "mileage": m.get("mileage"),
             "condition": str(m.get("condition")).lower() if m.get("condition") else None,
-            "photos": serialize_photos(
-                m.get("photos"),
-                max_photos=None if is_feed_csv_listing(m.get("carfax_url")) else 5,
-            ),
+            "photos": serialize_photos(m.get("photos")),
             "last_seen_at": str(m.get("last_seen_at")) if m.get("last_seen_at") else None,
             "down": _to_float(offer.down_payment) if offer else None,
             "monthly": _to_float(offer.monthly_payment) if offer else None,

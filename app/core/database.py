@@ -30,16 +30,17 @@ def _select_mysql_driver() -> str:
 
 def get_database_url() -> str:
     driver = _select_mysql_driver()
-    # str(URL) masks the password as "***"; Alembic/engine_from_config needs the real URL string.
-    return URL.create(
-        drivername=f"mysql+{driver}",
-        username=settings.mysql_user,
-        password=settings.mysql_password,
-        host=settings.mysql_host,
-        port=settings.mysql_port,
-        database=settings.mysql_db,
-        query={"charset": "utf8mb4"},
-    ).render_as_string(hide_password=False)
+    return str(
+        URL.create(
+            drivername=f"mysql+{driver}",
+            username=settings.mysql_user,
+            password=settings.mysql_password,
+            host=settings.mysql_host,
+            port=settings.mysql_port,
+            database=settings.mysql_db,
+            query={"charset": "utf8mb4"},
+        )
+    )
 
 
 def _connect_with_retry():

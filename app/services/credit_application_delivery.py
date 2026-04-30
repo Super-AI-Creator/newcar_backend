@@ -17,13 +17,6 @@ from app.services.ghl_contacts import lookup_ghl_contact_for_credit_payload
 logger = logging.getLogger(__name__)
 
 
-def _payload_for_credit_format(payload_json: Dict[str, Any]) -> Dict[str, Any]:
-    """Use raw applicant fields only; ignore stored formatted blocks when re-rendering email/webhook bodies."""
-    if not isinstance(payload_json, dict):
-        return {}
-    return {k: v for k, v in payload_json.items() if k not in ("formatted_plain", "formatted_html")}
-
-
 def _utc_iso(dt: Optional[datetime]) -> Optional[str]:
     if dt is None:
         return None
@@ -54,10 +47,9 @@ def send_credit_application_webhook(
     max_attempts = max(int(settings.credit_application_webhook_max_attempts), 1)
     base_backoff = max(float(settings.credit_application_webhook_retry_backoff_seconds), 0.0)
 
-    # Readable copies for Make / GoHighLevel (full values; integrations often map from these fields).
-    fmt_src = _payload_for_credit_format(payload_json)
-    plain_body = format_credit_application_plain(fmt_src, mask_sensitive=False)
-    html_body = format_credit_application_html(fmt_src, mask_sensitive=False)
+    # Readable copies for Make / GoHighLevel (masked); full structured data in payload_json for field mapping.
+    plain_masked = format_credit_application_plain(payload_json, mask_sensitive=True)
+    html_masked = format_credit_application_html(payload_json, mask_sensitive=True)
 
     body: Dict[str, Any] = {
         "event": "credit_application.submitted",
@@ -65,8 +57,8 @@ def send_credit_application_webhook(
         "created_at": _utc_iso(created_at),
         "source": source,
         "vin": vin,
-        "formatted_plain": plain_body,
-        "formatted_html": html_body,
+        "formatted_plain": plain_masked,
+        "formatted_html": html_masked,
         "payload": payload_json,
         "ghl_contact_id": ghl_contact_id,
         "ghl_contact_exists": bool(ghl_contact_id),
@@ -126,14 +118,13 @@ def send_credit_application_email(
     if vin:
         subject = f"{subject} (VIN {vin})"
 
-    fmt_src = _payload_for_credit_format(payload_json)
-    plain = format_credit_application_plain(fmt_src, mask_sensitive=False)
+    plain = format_credit_application_plain(payload_json, mask_sensitive=True)
     header = f"Application ID: {application_id}\nSource: {source}\n"
     if vin:
         header += f"VIN: {vin}\n"
     header += "\n"
 
-    html_inner = format_credit_application_html(fmt_src, mask_sensitive=False)
+    html_inner = format_credit_application_html(payload_json, mask_sensitive=True)
     html_wrap = (
         f'<p style="font-family:system-ui,sans-serif;font-size:14px;color:#333;">'
         f"<strong>Application ID:</strong> {application_id}<br/>"
@@ -177,8 +168,7 @@ def send_credit_application_ghl_fallback_email(
     if vin:
         subject = f"{subject} VIN {vin}"
 
-    fmt_src = _payload_for_credit_format(payload_json)
-    plain = format_credit_application_plain(fmt_src, mask_sensitive=False)
+    plain = format_credit_application_plain(payload_json, mask_sensitive=True)
     header = (
         f"No existing GoHighLevel contact matched applicant email or phone before submit.\n"
         f"Application ID: {application_id}\nSource: {source}\nApplicant email: {applicant_email or '—'}\n"
@@ -187,7 +177,7 @@ def send_credit_application_ghl_fallback_email(
         header += f"VIN: {vin}\n"
     header += "\n"
 
-    html_inner = format_credit_application_html(fmt_src, mask_sensitive=False)
+    html_inner = format_credit_application_html(payload_json, mask_sensitive=True)
     html_wrap = (
         f'<p style="font-family:system-ui,sans-serif;font-size:14px;color:#333;">'
         f"<strong>No GHL contact match</strong> for applicant email or phone.<br/>"

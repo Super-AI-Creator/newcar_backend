@@ -11,7 +11,7 @@ from app.core.deps import get_current_user, get_db
 from app.models.model_score import ModelScore
 from app.models.offer_override import OfferOverride
 from app.schemas.recommendations import RecommendationItem, RecommendationResponse, RecommendationExplanation
-from app.services.legacy_tables import build_inventory_query, is_feed_csv_listing, serialize_photos
+from app.services.legacy_tables import build_inventory_query, serialize_photos
 from app.services.payments import estimate_monthly_payment, resolve_price
 from app.services.recommendations import compute_vehicle_ranking_score, compute_weighted_score, select_model_score_by_fallback
 
@@ -88,10 +88,7 @@ def best_cars(
         mileage = int(row.mileage) if "mileage" in row._fields and row.mileage is not None else None
         condition = str(row.condition).lower() if "condition" in row._fields and row.condition else None
         price = resolve_price(row_vehicle_type, msrp, discounted, listed_price)
-        photos = serialize_photos(
-            getattr(row, "photos", None),
-            max_photos=None if is_feed_csv_listing(getattr(row, "carfax_url", None)) else 5,
-        )
+        photos = serialize_photos(getattr(row, "photos", None))
         photo = photos[0] if photos else None
         monthly: Optional[float] = None
         need_monthly_for_sort_or_filter = max_payment is not None or sort_by == "payment"

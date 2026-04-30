@@ -39,9 +39,6 @@ class DealOut(BaseModel):
     delivered_at: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
-    credit_union_id: Optional[int] = None
-    credit_union_name: Optional[str] = None
-    approval_amount: Optional[float] = None
 
 
 class DealEventOut(BaseModel):

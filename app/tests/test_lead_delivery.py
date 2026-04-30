@@ -53,23 +53,6 @@ def test_build_lead_webhook_payload_includes_expected_fields():
     assert payload["vehicle"] == "2024 Toyota Camry SE"
 
 
-def test_build_lead_webhook_payload_notes_default_when_empty():
-    row = LeadRequest(
-        id=11,
-        name="Jane",
-        email="jane@example.com",
-        phone="3105551212",
-        notes=None,
-    )
-    assert lead_delivery.build_lead_webhook_payload(row)["notes"] == "No note"
-
-    row.notes = ""
-    assert lead_delivery.build_lead_webhook_payload(row)["notes"] == "No note"
-
-    row.notes = "   "
-    assert lead_delivery.build_lead_webhook_payload(row)["notes"] == "No note"
-
-
 def test_send_lead_webhook_retries_then_succeeds(monkeypatch):
     prior = (
         settings.lead_webhook_url,

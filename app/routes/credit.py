@@ -17,28 +17,16 @@ from app.services.credit_application_format import enrich_payload_with_formatted
 from app.services.lender_logic import infer_credit_tier, select_best_rate
 from app.services.legacy_tables import load_legacy_tables
 from app.services.payments import estimate_monthly_payment, resolve_price
-from app.services.cu_member_scope import resolve_member_scope_user_id
 
 router = APIRouter(prefix="/credit", tags=["credit"])
-
-
-def _viewer_is_super_admin(viewer: Optional[User]) -> bool:
-    if viewer is None:
-        return False
-    role_value = viewer.role.value if hasattr(viewer.role, "value") else str(viewer.role)
-    return role_value == "super_admin"
 
 
 def _serialize_credit_application(
     row: CreditApplication,
     customer: Optional[User] = None,
     reviewer: Optional[User] = None,
-    viewer: Optional[User] = None,
 ) -> dict:
     payload = row.payload_json if isinstance(row.payload_json, dict) else {}
-    if _viewer_is_super_admin(viewer) and payload:
-        base = {k: v for k, v in payload.items() if k not in ("formatted_plain", "formatted_html")}
-        payload = enrich_payload_with_formatted(dict(base), mask_sensitive=False)
     customer_name = (
         customer.name
         if customer
@@ -67,17 +55,11 @@ def _serialize_credit_application(
 
 
 @router.post("/apply")
-def apply_credit(
-    payload: CreditApplicationIn,
-    member_user_id: Optional[int] = Query(None),
-    user=Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
+def apply_credit(payload: CreditApplicationIn, user=Depends(get_current_user), db: Session = Depends(get_db)):
     raw = payload.payload_json if isinstance(payload.payload_json, dict) else {}
-    merged = enrich_payload_with_formatted(raw, mask_sensitive=False)
+    merged = enrich_payload_with_formatted(raw, mask_sensitive=True)
     app_row = CreditApplication(
-        user_id=scoped_user_id,
+        user_id=user.id,
         vin=payload.vin,
         payload_json=merged,
         source="authenticated",
@@ -102,7 +84,7 @@ def apply_credit_public(payload: PublicCreditApplicationIn, db: Session = Depend
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You must agree to terms before submitting.")
 
     base = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
-    merged = enrich_payload_with_formatted(base, mask_sensitive=False)
+    merged = enrich_payload_with_formatted(base, mask_sensitive=True)
     app_row = CreditApplication(
         user_id=None,
         vin=payload.vin,
@@ -157,7 +139,6 @@ def list_credit_applications(
             row,
             customer=user_map.get(int(row.user_id)) if row.user_id is not None else None,
             reviewer=user_map.get(int(row.reviewed_by_user_id)) if row.reviewed_by_user_id is not None else None,
-            viewer=user,
         )
         for row in rows
     ]
@@ -169,7 +150,7 @@ def update_credit_application(
     application_id: int,
     payload: dict,
     db: Session = Depends(get_db),
-    user=Depends(require_role("broker_admin", "admin", "super_admin")),
+    user=Depends(require_role("broker_admin", "admin")),
 ):
     row = db.query(CreditApplication).filter(CreditApplication.id == application_id).first()
     if not row:
@@ -189,23 +170,20 @@ def update_credit_application(
     db.refresh(row)
     customer = db.query(User).filter(User.id == row.user_id).first() if row.user_id is not None else None
     reviewer = db.query(User).filter(User.id == row.reviewed_by_user_id).first() if row.reviewed_by_user_id is not None else None
-    return _serialize_credit_application(row, customer=customer, reviewer=reviewer, viewer=user)
+    return _serialize_credit_application(row, customer=customer, reviewer=reviewer)
 
 
 @router.get("/mine")
 def list_my_credit_applications(
     vin: Optional[str] = Query(None),
-    member_user_id: Optional[int] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
-    scoped_customer = user if int(scoped_user_id) == int(user.id) else db.query(User).filter(User.id == scoped_user_id).first()
-    normalized_email = (scoped_customer.email if scoped_customer else user.email or "").strip().lower()
+    normalized_email = (user.email or "").strip().lower()
     query = db.query(CreditApplication).filter(
-        (CreditApplication.user_id == scoped_user_id)
+        (CreditApplication.user_id == user.id)
         | (
             (CreditApplication.user_id.is_(None))
             & (func.lower(func.trim(func.json_unquote(func.json_extract(CreditApplication.payload_json, "$.email")))) == normalized_email)
@@ -216,7 +194,7 @@ def list_my_credit_applications(
 
     total = query.count()
     rows = query.offset((page - 1) * page_size).limit(page_size).all()
-    items = [_serialize_credit_application(row, customer=scoped_customer) for row in rows]
+    items = [_serialize_credit_application(row, customer=user) for row in rows]
     return {"items": items, "total": total}
 
 

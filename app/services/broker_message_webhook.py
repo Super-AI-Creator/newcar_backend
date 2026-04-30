@@ -13,7 +13,7 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.broker_message import BrokerMessage
 from app.models.user import User
-from app.services.broker_messages import parse_message_from_storage, should_run_broker_customer_webhook
+from app.services.broker_messages import parse_message_from_storage
 from app.services.ghl_contacts import lookup_ghl_contact_by_email
 
 logger = logging.getLogger(__name__)
@@ -112,7 +112,7 @@ def run_broker_customer_message_webhook_task(message_id: int) -> None:
             logger.warning("Broker message webhook: no row for message_id=%s", message_id)
             return
         sender_type, body = parse_message_from_storage(msg.message_text or "")
-        if not should_run_broker_customer_webhook(sender_type):
+        if sender_type != "customer":
             return
         user = db.query(User).filter(User.id == msg.user_id).first()
         if not user:

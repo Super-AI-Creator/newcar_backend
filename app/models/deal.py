@@ -14,12 +14,6 @@ class Deal(Base):
     status = Column(Enum(DealStatus), nullable=False, index=True, default=DealStatus.inquiry)
     customer_note = Column(Text, nullable=True)
     broker_note = Column(Text, nullable=True)
-    credit_union_id = Column(
-        BigInteger, ForeignKey("credit_unions.id", ondelete="SET NULL"), nullable=True, index=True
-    )
-    cu_approval_id = Column(
-        BigInteger, ForeignKey("cu_member_approvals.id", ondelete="SET NULL"), nullable=True, index=True
-    )
     delivery_scheduled_at = Column(DateTime, nullable=True)
     delivery_address = Column(String(255), nullable=True)
     delivery_city = Column(String(120), nullable=True)

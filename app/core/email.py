@@ -30,24 +30,18 @@ def _send_via_resend(
     body: str,
     attachments: Optional[Iterable[tuple]] = None,
     html_body: Optional[str] = None,
-    from_email: Optional[str] = None,
-    reply_to: Optional[str] = None,
 ) -> None:
     api_key = settings.resend_api_key
     if not api_key:
         raise EmailDeliveryError("Resend API key is not configured")
 
-    from_addr = (from_email or "").strip() or (settings.resend_from_email or settings.smtp_from_email)
+    from_email = settings.resend_from_email or settings.smtp_from_email
     payload = {
-        "from": from_addr,
+        "from": from_email,
         "to": [to_email],
         "subject": subject,
         "text": body,
     }
-    if reply_to and reply_to.strip():
-        payload["reply_to"] = reply_to.strip()
-    if html_body:
-        payload["html"] = html_body
     if attachments:
         payload["attachments"] = [
             {
@@ -75,16 +69,11 @@ def send_email(
     body: str,
     attachments: Optional[Iterable[tuple]] = None,
     html_body: Optional[str] = None,
-    from_email: Optional[str] = None,
-    reply_to: Optional[str] = None,
 ) -> None:
     msg = EmailMessage()
     msg["Subject"] = subject
-    from_addr = (from_email or "").strip() or settings.smtp_from_email
-    msg["From"] = from_addr
+    msg["From"] = settings.smtp_from_email
     msg["To"] = to_email
-    if reply_to and reply_to.strip():
-        msg["Reply-To"] = reply_to.strip()
     if html_body:
         msg.set_content(body)
         msg.add_alternative(html_body, subtype="html")
@@ -106,8 +95,6 @@ def send_email(
                     body=body,
                     attachments=attachments,
                     html_body=html_body,
-                    from_email=(from_email or "").strip() or None,
-                    reply_to=reply_to,
                 )
             else:
                 logger.warning(
@@ -125,8 +112,6 @@ def send_email(
                     body=body,
                     attachments=attachments,
                     html_body=html_body,
-                    from_email=(from_email or "").strip() or None,
-                    reply_to=reply_to,
                 )
             else:
                 _send_via_smtp(msg)

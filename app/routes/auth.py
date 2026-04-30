@@ -6,7 +6,6 @@ from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2 import id_token as google_id_token
 from sqlalchemy.orm import Session
 
-from app.core.auth_realm import login_realm_allows
 from app.core.config import settings
 from app.core.deps import get_db, get_current_user
 from app.core.email import EmailDeliveryError, send_email
@@ -20,10 +19,9 @@ from app.core.security import (
 )
 from app.models.auth_otp import AuthOtp
 from app.models.enums import OtpChannel, UserRole
-from app.models.credit_union import CreditUnion, CreditUnionMemberInvite
+from app.models.credit_union import CreditUnion
 from app.models.user import User
 from app.schemas.user import UserOut
-from app.services.user_out import build_user_out
 from app.schemas.auth import (
     GoogleAuthRequest,
     LoginRequest,
@@ -37,52 +35,6 @@ from app.schemas.auth import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-def _member_invite_and_cu(db: Session, token: str, registration_email: str):
-    """Validate an unused member invite; return (invite_row, credit_union). Raises HTTPException if invalid."""
-    inv = (
-        db.query(CreditUnionMemberInvite)
-        .filter(
-            CreditUnionMemberInvite.token == token,
-            CreditUnionMemberInvite.used_at.is_(None),
-        )
-        .first()
-    )
-    if not inv:
-        raise HTTPException(status_code=400, detail="Invalid or already used invitation link.")
-    cu = (
-        db.query(CreditUnion)
-        .filter(CreditUnion.id == inv.credit_union_id, CreditUnion.is_active == True)
-        .first()
-    )
-    if not cu:
-        raise HTTPException(status_code=400, detail="This invitation is no longer valid.")
-    want = (inv.invited_email or "").strip().lower()
-    if want and want != (registration_email or "").strip().lower():
-        raise HTTPException(
-            status_code=400,
-            detail="Use the email address this invitation was created for.",
-        )
-    return inv, cu
-
-
-def _credit_union_id_from_signup_payload(db: Session, data: RegisterRequest) -> int | None:
-    mit = (data.member_invite_token or "").strip()
-    if mit:
-        _, cu = _member_invite_and_cu(db, mit, str(data.email))
-        return cu.id
-    if data.cu_signup_token and data.cu_signup_token.strip():
-        cu = (
-            db.query(CreditUnion)
-            .filter(
-                CreditUnion.signup_token == data.cu_signup_token.strip(),
-                CreditUnion.is_active == True,
-            )
-            .first()
-        )
-        return cu.id if cu else None
-    return None
-
-
 def _to_channel(channel: str) -> OtpChannel:
     if channel == OtpChannel.email.value:
         return OtpChannel.email
@@ -93,15 +45,6 @@ def _to_channel(channel: str) -> OtpChannel:
 
 def _is_registration_complete(user: User) -> bool:
     return bool(user.is_email_verified or user.is_phone_verified)
-
-
-def _legacy_realm() -> str:
-    return (settings.auth_realm_legacy_default or "newcar_superstore").strip()
-
-
-def _register_effective_realm(data: RegisterRequest) -> str:
-    """Explicit auth_realm from client, or server default when omitted (avoids 422 for older builds)."""
-    return data.auth_realm if data.auth_realm is not None else _legacy_realm()
 
 
 @router.post("/google", response_model=TokenResponse)
@@ -122,7 +65,6 @@ def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
 
     user = db.query(User).filter(User.email == email).first()
     if not user:
-        realm = payload.auth_realm if payload.auth_realm is not None else _legacy_realm()
         user = User(
             email=email,
             name=name,
@@ -130,14 +72,11 @@ def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
             is_email_verified=email_verified,
             is_phone_verified=False,
             password_hash=None,
-            auth_realm=realm,
         )
         db.add(user)
         db.commit()
         db.refresh(user)
     else:
-        if not login_realm_allows(user.auth_realm, payload.auth_realm, _legacy_realm()):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Google token")
         if email_verified and not user.is_email_verified:
             user.is_email_verified = True
             db.commit()
@@ -162,15 +101,19 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
 
     password_hash = hash_password(data.password)
 
-    invite_row = None
-    mit = (data.member_invite_token or "").strip()
-    if mit:
-        invite_row, cu_inv = _member_invite_and_cu(db, mit, str(data.email))
-        credit_union_id = cu_inv.id
-    else:
-        credit_union_id = _credit_union_id_from_signup_payload(db, data)
+    credit_union_id = None
+    if data.cu_signup_token and data.cu_signup_token.strip():
+        cu = (
+            db.query(CreditUnion)
+            .filter(
+                CreditUnion.signup_token == data.cu_signup_token.strip(),
+                CreditUnion.is_active == True,
+            )
+            .first()
+        )
+        if cu:
+            credit_union_id = cu.id
 
-    realm = _register_effective_realm(data)
     user = User(
         email=data.email,
         phone=data.phone,
@@ -178,15 +121,10 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
         password_hash=password_hash,
         role=UserRole.customer,
         credit_union_id=credit_union_id,
-        auth_realm=realm,
         is_email_verified=True,
         is_phone_verified=bool(data.phone),
     )
     db.add(user)
-    db.flush()
-    if invite_row:
-        invite_row.used_at = datetime.utcnow()
-        invite_row.used_by_user_id = user.id
     db.commit()
     db.refresh(user)
 
@@ -200,24 +138,24 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
 @router.post("/otp/request")
 def request_otp(data: RegisterRequest, db: Session = Depends(get_db)):
     channel = _to_channel(data.channel)
-    realm = _register_effective_realm(data)
 
     user = db.query(User).filter(User.email == data.email).first()
     if user and _is_registration_complete(user) and user.password_hash:
         raise HTTPException(status_code=409, detail="User already registered. Please log in.")
 
     password_hash = hash_password(data.password)
-    credit_union_id = _credit_union_id_from_signup_payload(db, data)
+    credit_union_id = None
+    if data.cu_signup_token and data.cu_signup_token.strip():
+        cu = db.query(CreditUnion).filter(
+            CreditUnion.signup_token == data.cu_signup_token.strip(),
+            CreditUnion.is_active == True,
+        ).first()
+        if cu:
+            credit_union_id = cu.id
     if user:
-        if user.auth_realm and user.auth_realm != realm:
-            raise HTTPException(
-                status_code=409,
-                detail="Continue registration on the site where you started, or use a different email address.",
-            )
         user.name = data.name
         user.phone = data.phone
         user.password_hash = password_hash
-        user.auth_realm = realm
         if credit_union_id is not None:
             user.credit_union_id = credit_union_id
     else:
@@ -228,7 +166,6 @@ def request_otp(data: RegisterRequest, db: Session = Depends(get_db)):
             password_hash=password_hash,
             role=UserRole.customer,
             credit_union_id=credit_union_id,
-            auth_realm=realm,
             is_email_verified=False,
             is_phone_verified=False,
         )
@@ -299,24 +236,12 @@ def verify_otp(data: RegisterVerifyRequest, db: Session = Depends(get_db)):
     if not otp or not verify_code(data.code, otp.code_hash):
         raise HTTPException(status_code=400, detail="Invalid code")
 
-    if not login_realm_allows(user.auth_realm, data.auth_realm, _legacy_realm()):
-        raise HTTPException(
-            status_code=400,
-            detail="Complete verification on the same website where you requested the code.",
-        )
-
     otp.used_at = datetime.utcnow()
     if channel == OtpChannel.email:
         user.is_email_verified = True
     if channel == OtpChannel.sms:
         user.is_phone_verified = True
-    mit = (data.member_invite_token or "").strip()
-    if mit:
-        inv, cu = _member_invite_and_cu(db, mit, str(data.email))
-        user.credit_union_id = cu.id
-        inv.used_at = datetime.utcnow()
-        inv.used_by_user_id = user.id
-    elif data.cu_signup_token and data.cu_signup_token.strip():
+    if data.cu_signup_token and data.cu_signup_token.strip():
         cu = db.query(CreditUnion).filter(
             CreditUnion.signup_token == data.cu_signup_token.strip(),
             CreditUnion.is_active == True,
@@ -340,9 +265,6 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
     if not _is_registration_complete(user):
         raise HTTPException(status_code=403, detail="Complete OTP verification before login")
 
-    if not login_realm_allows(user.auth_realm, data.auth_realm, _legacy_realm()):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
-
     access = create_access_token(user.email)
     refresh = create_refresh_token(user.email)
     return TokenResponse(access_token=access, refresh_token=refresh)
@@ -362,7 +284,7 @@ def update_profile(payload: ProfileUpdateRequest, user=Depends(get_current_user)
     row.phone = payload.phone
     db.commit()
     db.refresh(row)
-    return build_user_out(db, row)
+    return row
 
 
 @router.post("/me/change-password")
