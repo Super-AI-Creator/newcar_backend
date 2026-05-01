@@ -582,6 +582,10 @@ def search_inventory(
         raise HTTPException(status_code=422, detail="vehicle_type must be one of: new, used, all")
     if condition not in {"used", "cpo", "all"}:
         raise HTTPException(status_code=422, detail="condition must be one of: used, cpo, all")
+    # Marketplace UI uses max_payment=10000 as "Any"; treat as unset so we use SQL pagination + full counts
+    # instead of the Python-side payment filter path (which only scanned ~200 rows and capped totals).
+    if max_payment is not None and float(max_payment) >= 10000:
+        max_payment = None
     if response is not None:
         _set_edge_cache_headers(response)
     cache_key = _cache_key_from_params(
@@ -704,7 +708,8 @@ def search_inventory(
 
     if offers_only:
         total = len(lease_special_vins)
-    elif (max_payment is None or max_payment <= 0) and not is_broad_default_query:
+    elif max_payment is None or max_payment <= 0:
+        # Real total for pagination (including broad /search?vehicle_type=new); avoids page_size+1 heuristic totals.
         total = db.execute(build_inventory_count_query(engine, filters)).scalar() or 0
     else:
         total = None
