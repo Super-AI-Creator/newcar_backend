@@ -77,6 +77,8 @@ class MemberInviteCreate(BaseModel):
     """Optional email locks signup to that address for this one-time link."""
 
     invited_email: Optional[str] = None
+    invited_name: Optional[str] = None
+    invited_phone: Optional[str] = None
 
     @field_validator("invited_email", mode="before")
     @classmethod
@@ -86,6 +88,26 @@ class MemberInviteCreate(BaseModel):
         if isinstance(v, str):
             s = v.strip().lower()
             return s or None
+        return None
+
+    @field_validator("invited_name", mode="before")
+    @classmethod
+    def normalize_invited_name(cls, v: object) -> Optional[str]:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            s = v.strip()
+            return s[:255] or None
+        return None
+
+    @field_validator("invited_phone", mode="before")
+    @classmethod
+    def normalize_invited_phone(cls, v: object) -> Optional[str]:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            s = v.strip()
+            return s[:50] or None
         return None
 
 
@@ -480,6 +502,8 @@ def get_credit_union_by_member_invite(invite: str = Query(..., alias="invite"), 
     out = _serialize_cu(cu)
     out["is_personal_invite"] = True
     out["invited_email"] = inv.invited_email
+    out["invited_name"] = inv.invited_name
+    out["invited_phone"] = inv.invited_phone
     return out
 
 
@@ -724,6 +748,8 @@ def _serialize_member_invite(inv: CreditUnionMemberInvite, base: str) -> dict:
     return {
         "id": inv.id,
         "invited_email": inv.invited_email,
+        "invited_name": inv.invited_name,
+        "invited_phone": inv.invited_phone,
         "token": inv.token,
         "used_at": str(inv.used_at) if inv.used_at else None,
         "created_at": str(inv.created_at) if inv.created_at else None,
@@ -758,6 +784,8 @@ def create_credit_union_member_invite(
         credit_union_id=cu.id,
         token=tok,
         invited_email=payload.invited_email,
+        invited_name=payload.invited_name,
+        invited_phone=payload.invited_phone,
         created_by_user_id=user.id,
     )
     db.add(inv)

@@ -64,6 +64,8 @@ class CreditUnionMemberInvite(Base):
     credit_union_id = Column(BigInteger, ForeignKey("credit_unions.id", ondelete="CASCADE"), nullable=False, index=True)
     token = Column(String(64), unique=True, nullable=False, index=True)
     invited_email = Column(String(255), nullable=True)
+    invited_name = Column(String(255), nullable=True)
+    invited_phone = Column(String(50), nullable=True)
     created_by_user_id = Column(BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     used_at = Column(DateTime, nullable=True, index=True)
     used_by_user_id = Column(BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)

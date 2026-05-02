@@ -668,7 +668,11 @@ def search_inventory(
             fetch_size = page_size
         offset = (page - 1) * page_size
     elif max_payment is not None and max_payment > 0:
-        fetch_size = min(500, max(page_size * 10, 100))
+        # Used inventory needs a wider pull before payment filter; new keeps a smaller scan.
+        if str(vehicle_type or "").lower() == "used":
+            fetch_size = min(5000, max(page_size * 40, 800))
+        else:
+            fetch_size = min(500, max(page_size * 10, 100))
         offset = 0
     else:
         fetch_size = page_size
@@ -757,13 +761,17 @@ def search_inventory(
         discounted_value,
         listed_price_value,
     ) -> Optional[float]:
-        if str(vehicle_type_value or "").lower() != "new":
-            return None
+        vt = str(vehicle_type_value or "").lower()
         price = resolve_price(vehicle_type_value, msrp_value, discounted_value, listed_price_value)
         if price is None:
             return None
-        taxed_price = float(price) * 1.10
-        return round(estimate_monthly_payment(taxed_price, float(apr), int(term_months), float(down_payment)), 2)
+        if vt == "new":
+            taxed_price = float(price) * 1.10
+            return round(estimate_monthly_payment(taxed_price, float(apr), int(term_months), float(down_payment)), 2)
+        if vt == "used":
+            base = float(price)
+            return round(estimate_monthly_payment(base, float(apr), int(term_months), float(down_payment)), 2)
+        return None
 
     for row in rows:
         mapping = row._mapping
@@ -909,12 +917,10 @@ def search_inventory(
 
     if max_payment is not None and max_payment > 0:
         def _monthly_ok(item: InventoryItem) -> bool:
-            if (item.vehicle_type or "").lower() != "new":
-                return True
             monthly = item.estimated_monthly
             if monthly is None:
-                return True
-            return float(monthly) <= max_payment
+                return False
+            return float(monthly) <= float(max_payment)
         items = [i for i in items if _monthly_ok(i)]
         if manual_items:
             manual_filtered = [i for i in manual_items if _monthly_ok(i)]
