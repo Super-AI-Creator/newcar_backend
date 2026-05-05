@@ -72,6 +72,7 @@ class CreditUnionCreate(BaseModel):
     contact_name: Optional[str] = None
     contact_phone: Optional[str] = None
     contact_email: Optional[str] = None
+    preapproval_apply_url: Optional[str] = None
     loan_programs: List[LoanProgramIn] = []
     disclosures: List[DisclosureIn] = []
 
@@ -127,6 +128,7 @@ class CreditUnionUpdate(BaseModel):
     contact_name: Optional[str] = None
     contact_phone: Optional[str] = None
     contact_email: Optional[str] = None
+    preapproval_apply_url: Optional[str] = None
     is_active: Optional[bool] = None
     loan_programs: Optional[List[LoanProgramIn]] = None
     disclosures: Optional[List[DisclosureIn]] = None
@@ -145,6 +147,7 @@ def _serialize_cu(
         "banner_url": cu.banner_url,
         "hero_title": cu.hero_title,
         "hero_subtitle": cu.hero_subtitle,
+        "preapproval_apply_url": cu.preapproval_apply_url,
         "testimonial_image_url": cu.testimonial_image_url,
         "testimonial_text": cu.testimonial_text,
         "phone": cu.phone,
@@ -296,6 +299,7 @@ def admin_create_credit_union(
         contact_name=(payload.contact_name or "").strip() or None,
         contact_phone=(payload.contact_phone or "").strip() or None,
         contact_email=(payload.contact_email or "").strip() or None,
+        preapproval_apply_url=(payload.preapproval_apply_url or "").strip() or None,
         signup_token=secrets.token_urlsafe(32),
         is_active=True,
     )
@@ -603,6 +607,8 @@ def admin_update_credit_union(
         cu.contact_phone = (payload.contact_phone or "").strip() or None
     if payload.contact_email is not None:
         cu.contact_email = (payload.contact_email or "").strip() or None
+    if payload.preapproval_apply_url is not None:
+        cu.preapproval_apply_url = (payload.preapproval_apply_url or "").strip() or None
     if payload.is_active is not None:
         cu.is_active = bool(payload.is_active)
     if payload.loan_programs is not None:
