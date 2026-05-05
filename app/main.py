@@ -9,7 +9,7 @@ from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from sqlalchemy.orm import Session
 
@@ -59,8 +59,20 @@ app.add_middleware(
 app.mount("/uploads", StaticFiles(directory=str(_uploads_dir), check_dir=False), name="uploads")
 
 
+def _looks_like_missing_schema(exc: BaseException) -> bool:
+    """True when ORM expects columns/tables that are not in the database (migrations not applied)."""
+    raw = str(getattr(exc, "orig", exc) or exc).lower()
+    return (
+        "unknown column" in raw
+        or "no such column" in raw
+        or ("column" in raw and "does not exist" in raw)
+        or "doesn't exist" in raw
+    )
+
+
 @app.exception_handler(OperationalError)
 async def handle_db_operational_error(_, exc: OperationalError):
+    logger.error("Database operational error", exc_info=exc)
     code = None
     original = getattr(exc, "orig", None)
     if hasattr(original, "args") and original.args:
@@ -72,6 +84,29 @@ async def handle_db_operational_error(_, exc: OperationalError):
             content={"detail": "Database is temporarily busy. Please retry in a few seconds."},
         )
 
+    if _looks_like_missing_schema(exc):
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "Database schema is out of date for this API version.",
+                "hint": "In manage_backend, run: alembic upgrade head",
+            },
+        )
+
+    return JSONResponse(status_code=500, content={"detail": "Database operation failed."})
+
+
+@app.exception_handler(ProgrammingError)
+async def handle_db_programming_error(_, exc: ProgrammingError):
+    logger.error("Database programming error", exc_info=exc)
+    if _looks_like_missing_schema(exc):
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "Database schema is out of date for this API version.",
+                "hint": "In manage_backend, run: alembic upgrade head",
+            },
+        )
     return JSONResponse(status_code=500, content={"detail": "Database operation failed."})
 
 

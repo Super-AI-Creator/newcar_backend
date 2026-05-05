@@ -247,7 +247,16 @@ def list_all_deals(
             raise HTTPException(status_code=400, detail="Invalid status") from exc
         query = query.filter(Deal.status == status_enum)
     rows = query.order_by(Deal.updated_at.desc(), Deal.created_at.desc()).limit(500).all()
-    return {"items": _deals_list_items(db, rows)}
+    items = _deals_list_items(db, rows)
+    user_ids = {int(r.user_id) for r in rows if r.user_id is not None}
+    if user_ids:
+        users = db.query(User).filter(User.id.in_(user_ids)).all()
+        umap = {int(u.id): u for u in users}
+        for deal, row in zip(items, rows):
+            u = umap.get(int(row.user_id))
+            deal["customer_name"] = (u.name if u else None) or None
+            deal["customer_email"] = (u.email if u else None) or None
+    return {"items": items}
 
 
 @router.patch("/{deal_id}", response_model=DealOut)

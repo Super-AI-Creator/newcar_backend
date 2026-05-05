@@ -39,7 +39,8 @@ _FILTERS_CACHE: dict[str, tuple[float, dict]] = {}
 _FILTERS_CACHE_TTL_SECONDS = 30.0
 _FILTERS_CACHE_MAX_ENTRIES = 64
 _MONTH_KEY_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
-_MAX_HOMEPAGE_FEATURED_VEHICLES = 6
+# Must stay in sync with homepage UI (CU partner page, storefront hero): Query(le=...) rejects larger limits with 422.
+_MAX_HOMEPAGE_FEATURED_VEHICLES = 8
 _HOMEPAGE_SPECIALS_CACHE: dict[str, tuple[float, dict]] = {}
 _HOMEPAGE_SPECIALS_CACHE_TTL_SECONDS = 60.0
 _EDGE_CACHE_HEADER_VALUE = "public, s-maxage=600, stale-while-revalidate=3600"
@@ -668,11 +669,11 @@ def search_inventory(
             fetch_size = page_size
         offset = (page - 1) * page_size
     elif max_payment is not None and max_payment > 0:
-        # Used inventory needs a wider pull before payment filter; new keeps a smaller scan.
+        # Wider pull before Python-side payment filter so totals and pages aren’t stuck at the first N SQL rows.
         if str(vehicle_type or "").lower() == "used":
             fetch_size = min(5000, max(page_size * 40, 800))
         else:
-            fetch_size = min(500, max(page_size * 10, 100))
+            fetch_size = min(12000, max(page_size * 60, 4000))
         offset = 0
     else:
         fetch_size = page_size

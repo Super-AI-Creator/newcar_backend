@@ -3,6 +3,7 @@ Credit Union management (admin), public white-label config, and pre-approvals.
 """
 import re
 import secrets
+import string
 from decimal import Decimal
 from typing import List, Optional
 
@@ -16,7 +17,7 @@ from app.core.auth_realm import AUTH_REALM_CARSCU
 from app.core.config import settings
 from app.core.email import EmailDeliveryError, send_email
 from app.core.deps import get_current_user, get_db, require_role
-from app.core.security import hash_password
+from app.core.security import create_access_token, create_refresh_token, hash_password
 from app.models.broker_message import BrokerMessage
 from app.models.credit_union import (
     CreditUnion,
@@ -30,9 +31,11 @@ from app.models.document_submission import DocumentSubmission
 from app.models.enums import UserRole
 from app.models.favorite import Favorite
 from app.models.user import User
+from app.schemas.auth import TokenResponse
 from app.schemas.user import UserOut
 from app.services.cu_member_scope import resolve_member_scope_user_id
 from app.services.sms import send_sms
+from app.services.user_out import _credit_union_for_member
 
 router = APIRouter(tags=["credit_unions"])
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
@@ -129,7 +132,11 @@ class CreditUnionUpdate(BaseModel):
     disclosures: Optional[List[DisclosureIn]] = None
 
 
-def _serialize_cu(cu: CreditUnion, include_relations: bool = True) -> dict:
+def _serialize_cu(
+    cu: CreditUnion,
+    include_relations: bool = True,
+    include_admin_internal: bool = False,
+) -> dict:
     out = {
         "id": cu.id,
         "name": cu.name,
@@ -151,6 +158,8 @@ def _serialize_cu(cu: CreditUnion, include_relations: bool = True) -> dict:
         "created_at": str(cu.created_at) if cu.created_at else None,
         "updated_at": str(cu.updated_at) if cu.updated_at else None,
     }
+    if include_admin_internal:
+        out["primary_staff_user_id"] = getattr(cu, "primary_staff_user_id", None)
     if include_relations:
         out["loan_programs"] = [
             {
@@ -186,11 +195,58 @@ def _platform_member_site_base_url() -> str:
     return base
 
 
+def _attach_primary_staff_summary_to_admin_cu_items(db: Session, rows: list, items: List[dict]) -> None:
+    """Mutates each item dict with primary_staff_email / primary_staff_name for the admin directory."""
+    if not rows:
+        return
+    cu_ids = [int(cu.id) for cu in rows]
+    staff_rows = (
+        db.query(User)
+        .filter(
+            User.credit_union_id.in_(cu_ids),
+            User.role == UserRole.credit_union,
+            User.auth_realm == AUTH_REALM_CARSCU,
+        )
+        .order_by(User.credit_union_id.asc(), User.id.asc())
+        .all()
+    )
+    first_staff_by_cu: dict[int, User] = {}
+    for u in staff_rows:
+        cid = int(u.credit_union_id)
+        if cid not in first_staff_by_cu:
+            first_staff_by_cu[cid] = u
+
+    primary_ids = [int(getattr(cu, "primary_staff_user_id", None) or 0) for cu in rows]
+    pid_set = {pid for pid in primary_ids if pid > 0}
+    users_by_id: dict[int, User] = {}
+    if pid_set:
+        for u in db.query(User).filter(User.id.in_(pid_set)).all():
+            users_by_id[int(u.id)] = u
+
+    for item, cu in zip(items, rows):
+        cid = int(cu.id)
+        staff_user: Optional[User] = None
+        pid = getattr(cu, "primary_staff_user_id", None)
+        if pid:
+            u = users_by_id.get(int(pid))
+            if (
+                u
+                and u.role == UserRole.credit_union
+                and int(u.credit_union_id or 0) == cid
+            ):
+                staff_user = u
+        if staff_user is None:
+            staff_user = first_staff_by_cu.get(cid)
+        item["primary_staff_email"] = staff_user.email if staff_user else None
+        item["primary_staff_name"] = (staff_user.name if staff_user else None) or None
+
+
 # ---------- Admin: Credit Unions (super_admin) ----------
 @router.get("/admin/credit-unions")
 def admin_list_credit_unions(
     q: Optional[str] = Query(None),
     include_inactive: bool = Query(False),
+    include_primary_staff: bool = Query(True),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
     user=Depends(require_role("super_admin")),
@@ -208,7 +264,10 @@ def admin_list_credit_unions(
                 | (CreditUnion.contact_email.ilike(f"%{needle}%"))
             )
     rows = query.order_by(CreditUnion.name.asc()).limit(limit).all()
-    return {"items": [_serialize_cu(r) for r in rows]}
+    items = [_serialize_cu(r, include_admin_internal=True) for r in rows]
+    if include_primary_staff:
+        _attach_primary_staff_summary_to_admin_cu_items(db, rows, items)
+    return {"items": items}
 
 
 @router.post("/admin/credit-unions")
@@ -255,7 +314,7 @@ def admin_create_credit_union(
         db.add(disc)
     db.commit()
     db.refresh(cu)
-    return {"item": _serialize_cu(cu)}
+    return {"item": _serialize_cu(cu, include_admin_internal=True)}
 
 
 @router.get("/admin/credit-unions/{cu_id}")
@@ -268,7 +327,7 @@ def admin_get_credit_union(
     cu = db.query(CreditUnion).filter(CreditUnion.id == cu_id).first()
     if not cu:
         raise HTTPException(status_code=404, detail="Credit union not found.")
-    return _serialize_cu(cu)
+    return _serialize_cu(cu, include_admin_internal=True)
 
 
 class AssignStaffBody(BaseModel):
@@ -277,6 +336,33 @@ class AssignStaffBody(BaseModel):
     name: Optional[str] = None
     """Temporary password — required only when creating a new user (min 8 characters)."""
     password: Optional[str] = None
+
+
+class SetPrimaryStaffBody(BaseModel):
+    user_id: int
+
+
+def _generate_temp_password(length: int = 14) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _primary_staff_user(db: Session, cu: CreditUnion) -> Optional[User]:
+    pid = getattr(cu, "primary_staff_user_id", None)
+    if pid:
+        u = db.query(User).filter(User.id == pid).first()
+        if u and u.role == UserRole.credit_union and int(u.credit_union_id or 0) == int(cu.id):
+            return u
+    return (
+        db.query(User)
+        .filter(
+            User.credit_union_id == cu.id,
+            User.role == UserRole.credit_union,
+            User.auth_realm == AUTH_REALM_CARSCU,
+        )
+        .order_by(User.id.asc())
+        .first()
+    )
 
 
 @router.post("/admin/credit-unions/{cu_id}/assign-staff")
@@ -294,6 +380,9 @@ def admin_assign_credit_union_staff(
     if not email:
         raise HTTPException(status_code=400, detail="Email is required.")
     target = db.query(User).filter(User.email == email, User.auth_realm == AUTH_REALM_CARSCU).first()
+    staff_user: User
+    message: str
+
     if target:
         if target.role == UserRole.super_admin:
             raise HTTPException(
@@ -303,47 +392,174 @@ def admin_assign_credit_union_staff(
         target.role = UserRole.credit_union
         target.credit_union_id = cu_id
         target.auth_realm = AUTH_REALM_CARSCU
-        db.commit()
-        return {
-            "ok": True,
-            "message": f"{email} is now Credit Union staff for {cu.name}. They can log in at /login and open the CU dashboard.",
-        }
+        staff_user = target
+        message = f"{email} is now Credit Union staff for {cu.name}. They can log in at /login and open the CU dashboard."
+    else:
+        pwd = (payload.password or "").strip()
+        name = (payload.name or "").strip()
+        if len(pwd) < 8:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No account exists with that email yet. Either have them register at /register first, "
+                    "or enter Display name + Temporary password (8+ characters) below to create their staff login now."
+                ),
+            )
+        if not name:
+            raise HTTPException(status_code=400, detail="Display name is required when creating a new staff user.")
 
-    pwd = (payload.password or "").strip()
-    name = (payload.name or "").strip()
-    if len(pwd) < 8:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No account exists with that email yet. Either have them register at /register first, "
-                "or enter Display name + Temporary password (8+ characters) below to create their staff login now."
-            ),
+        staff_user = User(
+            email=email,
+            name=name,
+            role=UserRole.credit_union,
+            password_hash=hash_password(pwd),
+            credit_union_id=cu_id,
+            phone=None,
+            auth_realm=AUTH_REALM_CARSCU,
+            is_email_verified=True,
+            is_phone_verified=False,
         )
-    if not name:
-        raise HTTPException(status_code=400, detail="Display name is required when creating a new staff user.")
+        db.add(staff_user)
+        message = f"Created staff login for {email} on {cu.name}. They can sign in at /login and should change their password after first login."
 
-    row = User(
-        email=email,
-        name=name,
-        role=UserRole.credit_union,
-        password_hash=hash_password(pwd),
-        credit_union_id=cu_id,
-        phone=None,
-        auth_realm=AUTH_REALM_CARSCU,
-        is_email_verified=True,
-        is_phone_verified=False,
-    )
-    db.add(row)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Could not create user (email may already be in use).") from None
+
+    if getattr(cu, "primary_staff_user_id", None) is None:
+        cu.primary_staff_user_id = staff_user.id
+
     try:
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=409, detail="Could not create user (email may already be in use).") from None
-    db.refresh(row)
+        raise HTTPException(status_code=409, detail="Could not save staff assignment.") from None
+
+    return {"ok": True, "message": message}
+
+
+@router.get("/admin/credit-unions/{cu_id}/primary-staff-summary")
+def admin_primary_staff_summary(
+    cu_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    cu = db.query(CreditUnion).filter(CreditUnion.id == cu_id).first()
+    if not cu:
+        raise HTTPException(status_code=404, detail="Credit union not found.")
+    staff = _primary_staff_user(db, cu)
+    staff_rows = (
+        db.query(User)
+        .filter(
+            User.credit_union_id == cu_id,
+            User.role == UserRole.credit_union,
+            User.auth_realm == AUTH_REALM_CARSCU,
+        )
+        .order_by(User.id.asc())
+        .all()
+    )
+    return {
+        "primary_staff_user_id": getattr(cu, "primary_staff_user_id", None),
+        "primary": (
+            {
+                "user_id": staff.id,
+                "email": staff.email,
+                "name": staff.name,
+                "has_password": bool(staff.password_hash),
+            }
+            if staff
+            else None
+        ),
+        "all_staff": [
+            {
+                "user_id": u.id,
+                "email": u.email,
+                "name": u.name,
+                "is_primary": bool(staff and u.id == staff.id),
+            }
+            for u in staff_rows
+        ],
+    }
+
+
+@router.post("/admin/credit-unions/{cu_id}/primary-staff")
+def admin_set_primary_staff(
+    cu_id: int,
+    payload: SetPrimaryStaffBody,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    cu = db.query(CreditUnion).filter(CreditUnion.id == cu_id).first()
+    if not cu:
+        raise HTTPException(status_code=404, detail="Credit union not found.")
+    staff = (
+        db.query(User)
+        .filter(
+            User.id == payload.user_id,
+            User.credit_union_id == cu_id,
+            User.role == UserRole.credit_union,
+            User.auth_realm == AUTH_REALM_CARSCU,
+        )
+        .first()
+    )
+    if not staff:
+        raise HTTPException(status_code=400, detail="That user is not credit union staff for this organization.")
+    cu.primary_staff_user_id = staff.id
+    db.commit()
+    return {"ok": True, "message": f"Primary staff login is now {staff.email}."}
+
+
+@router.post("/admin/credit-unions/{cu_id}/reset-primary-staff-password")
+def admin_reset_primary_staff_password(
+    cu_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    cu = db.query(CreditUnion).filter(CreditUnion.id == cu_id).first()
+    if not cu:
+        raise HTTPException(status_code=404, detail="Credit union not found.")
+    staff = _primary_staff_user(db, cu)
+    if not staff:
+        raise HTTPException(
+            status_code=400,
+            detail="No primary CU staff user. Assign or create staff first, then try again.",
+        )
+    plain = _generate_temp_password(16)
+    staff.password_hash = hash_password(plain)
+    db.commit()
     return {
         "ok": True,
-        "message": f"Created staff login for {email} on {cu.name}. They can sign in at /login and should change their password after first login.",
+        "temporary_password": plain,
+        "email": staff.email,
+        "message": "Temporary password generated. Copy it now — it will not be shown again.",
     }
+
+
+@router.post("/admin/credit-unions/{cu_id}/impersonate-staff", response_model=TokenResponse)
+def admin_impersonate_credit_union_staff(
+    cu_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("super_admin")),
+):
+    _ = user
+    cu = db.query(CreditUnion).filter(CreditUnion.id == cu_id).first()
+    if not cu:
+        raise HTTPException(status_code=404, detail="Credit union not found.")
+    staff = _primary_staff_user(db, cu)
+    if not staff:
+        raise HTTPException(
+            status_code=400,
+            detail="No CU staff to impersonate. Assign or create a staff user for this credit union first.",
+        )
+    sub = str(staff.id)
+    access = create_access_token(sub)
+    refresh = create_refresh_token(sub)
+    return TokenResponse(access_token=access, refresh_token=refresh)
 
 
 @router.put("/admin/credit-unions/{cu_id}")
@@ -406,7 +622,7 @@ def admin_update_credit_union(
             db.add(disc)
     db.commit()
     db.refresh(cu)
-    return {"item": _serialize_cu(cu)}
+    return {"item": _serialize_cu(cu, include_admin_internal=True)}
 
 
 @router.delete("/admin/credit-unions/{cu_id}")
@@ -505,6 +721,24 @@ def get_credit_union_by_member_invite(invite: str = Query(..., alias="invite"), 
     out["invited_name"] = inv.invited_name
     out["invited_phone"] = inv.invited_phone
     return out
+
+
+@router.get("/credit-unions/for-member")
+def get_credit_union_for_logged_in_member(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """
+    Logged-in member: return their credit union's public config (slug, name, logo, etc.).
+    Used by the marketplace header when the client session is missing `credit_union_slug` on `/me`.
+    """
+    role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if role != UserRole.customer.value:
+        raise HTTPException(status_code=403, detail="Members only.")
+    cu = _credit_union_for_member(db, user)
+    if not cu:
+        raise HTTPException(status_code=404, detail="No credit union linked to this account.")
+    return _serialize_cu(cu)
 
 
 @router.get("/credit-unions/mine")

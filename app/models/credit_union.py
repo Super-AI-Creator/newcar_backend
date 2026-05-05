@@ -23,6 +23,7 @@ class CreditUnion(Base):
     testimonial_image_url = Column(String(500), nullable=True)
     testimonial_text = Column(Text, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
+    primary_staff_user_id = Column(BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
