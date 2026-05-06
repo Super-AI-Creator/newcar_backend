@@ -405,8 +405,8 @@ def admin_assign_credit_union_staff(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "No account exists with that email yet. Either have them register at /register first, "
-                    "or enter Display name + Temporary password (8+ characters) below to create their staff login now."
+                    "No account exists with that email yet. Enter Display name + Temporary password "
+                    "(8+ characters) below to create their staff login now."
                 ),
             )
         if not name:

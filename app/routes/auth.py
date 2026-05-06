@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import secrets
 from datetime import datetime, timedelta
 
@@ -22,7 +23,7 @@ from app.core.security import (
 )
 from app.models.auth_otp import AuthOtp
 from app.models.enums import OtpChannel, UserRole
-from app.models.credit_union import CreditUnion, CreditUnionMemberInvite
+from app.models.credit_union import CreditUnion, CreditUnionMemberInvite, CuMemberApproval
 from app.models.user import User
 from app.schemas.user import UserOut
 from app.services.user_out import build_user_out
@@ -38,8 +39,61 @@ from app.schemas.auth import (
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+_APPROVAL_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
-def _member_invite_and_cu(db: Session, token: str, registration_email: str):
+_SIGNUP_NEED_INVITE = (
+    "Accounts are created through your credit union. Use the invitation or pre-approval link they sent you."
+)
+_ORPHAN_MEMBER_LOGIN = (
+    "Member accounts must be linked to a credit union. Open the invitation your credit union sent you, or contact them for access."
+)
+
+
+def _signup_tokens_present(data: RegisterRequest) -> bool:
+    mit = (data.member_invite_token or "").strip()
+    cst = (data.cu_signup_token or "").strip()
+    apc = (data.approval_claim_code or "").strip()
+    return bool(mit or cst or apc)
+
+
+def _require_signup_tokens(data: RegisterRequest) -> None:
+    if not _signup_tokens_present(data):
+        raise HTTPException(status_code=400, detail=_SIGNUP_NEED_INVITE)
+
+
+def _require_customer_credit_union(user: User) -> None:
+    role_val = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if role_val != UserRole.customer.value:
+        return
+    if user.credit_union_id is None:
+        raise HTTPException(status_code=400, detail=_SIGNUP_NEED_INVITE)
+
+
+def _normalize_phone_digits(raw: str | None) -> str:
+    return re.sub(r"\D", "", raw or "")
+
+
+def _names_match(expected: str | None, got: str | None) -> bool:
+    e = " ".join((expected or "").split()).lower()
+    if not e:
+        return True
+    g = " ".join((got or "").split()).lower()
+    return e == g
+
+
+def _phones_match(expected: str | None, got: str | None) -> bool:
+    if not (expected or "").strip():
+        return True
+    return _normalize_phone_digits(expected) == _normalize_phone_digits(got)
+
+
+def _member_invite_and_cu(
+    db: Session,
+    token: str,
+    registration_email: str,
+    registration_name: str,
+    registration_phone: str | None,
+):
     """Validate an unused member invite; return (invite_row, credit_union). Raises HTTPException if invalid."""
     inv = (
         db.query(CreditUnionMemberInvite)
@@ -64,14 +118,63 @@ def _member_invite_and_cu(db: Session, token: str, registration_email: str):
             status_code=400,
             detail="Use the email address this invitation was created for.",
         )
+    want_name = (inv.invited_name or "").strip()
+    if want_name and not _names_match(want_name, registration_name):
+        raise HTTPException(
+            status_code=400,
+            detail="Use the name this invitation was created for.",
+        )
+    want_phone = (inv.invited_phone or "").strip()
+    if want_phone and not _phones_match(want_phone, registration_phone):
+        raise HTTPException(
+            status_code=400,
+            detail="Use the phone number this invitation was created for.",
+        )
     return inv, cu
+
+
+def _validate_approval_for_registration(
+    db: Session,
+    code: str,
+    registration_email: str,
+    registration_name: str,
+    registration_phone: str | None,
+) -> int:
+    c = (code or "").strip()
+    if not c or len(c) > 64 or not _APPROVAL_CODE_RE.match(c):
+        raise HTTPException(status_code=400, detail="Invalid approval reference.")
+    row = db.query(CuMemberApproval).filter(CuMemberApproval.approval_code == c).first()
+    if not row:
+        raise HTTPException(status_code=400, detail="Invalid approval reference.")
+    want_em = (row.member_email or "").strip().lower()
+    if want_em and want_em != (registration_email or "").strip().lower():
+        raise HTTPException(
+            status_code=400,
+            detail="Use the email address on file for this approval.",
+        )
+    want_name = (row.member_name or "").strip()
+    if want_name and not _names_match(want_name, registration_name):
+        raise HTTPException(
+            status_code=400,
+            detail="Use the name on file for this approval.",
+        )
+    want_phone = (row.member_phone or "").strip()
+    if want_phone and not _phones_match(want_phone, registration_phone):
+        raise HTTPException(
+            status_code=400,
+            detail="Use the phone number on file for this approval.",
+        )
+    return int(row.credit_union_id)
 
 
 def _credit_union_id_from_signup_payload(db: Session, data: RegisterRequest) -> int | None:
     mit = (data.member_invite_token or "").strip()
     if mit:
-        _, cu = _member_invite_and_cu(db, mit, str(data.email))
+        _, cu = _member_invite_and_cu(db, mit, str(data.email), str(data.name), data.phone)
         return cu.id
+    apc = (data.approval_claim_code or "").strip()
+    if apc:
+        return _validate_approval_for_registration(db, apc, str(data.email), str(data.name), data.phone)
     if data.cu_signup_token and data.cu_signup_token.strip():
         cu = (
             db.query(CreditUnion)
@@ -158,6 +261,11 @@ def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
     realm = payload.auth_realm if payload.auth_realm is not None else _legacy_realm()
     user = _user_by_email_realm(db, email, realm)
     if not user:
+        if realm == AUTH_REALM_CARSCU:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Use the signup link from your credit union to create an account.",
+            )
         user = User(
             email=email,
             name=name,
@@ -173,6 +281,9 @@ def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
     else:
         if not login_realm_allows(user.auth_realm, payload.auth_realm, _legacy_realm()):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Google token")
+        role_val = user.role.value if hasattr(user.role, "value") else str(user.role)
+        if realm == AUTH_REALM_CARSCU and role_val == UserRole.customer.value and user.credit_union_id is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_ORPHAN_MEMBER_LOGIN)
         if email_verified and not user.is_email_verified:
             user.is_email_verified = True
             db.commit()
@@ -186,6 +297,7 @@ def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
 @router.post("/register", response_model=TokenResponse)
 def register(data: RegisterRequest, db: Session = Depends(get_db)):
     realm = _register_effective_realm(data)
+    _require_signup_tokens(data)
     existing = _user_by_email_realm(db, str(data.email), realm)
     if existing:
         if existing.password_hash:
@@ -200,12 +312,18 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
     password_hash = hash_password(data.password)
 
     invite_row = None
+    credit_union_id: int | None
     mit = (data.member_invite_token or "").strip()
     if mit:
-        invite_row, cu_inv = _member_invite_and_cu(db, mit, str(data.email))
+        invite_row, cu_inv = _member_invite_and_cu(db, mit, str(data.email), str(data.name), data.phone)
         credit_union_id = cu_inv.id
     else:
         credit_union_id = _credit_union_id_from_signup_payload(db, data)
+    if credit_union_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired credit union invitation. Request a new link from your credit union.",
+        )
 
     user = User(
         email=data.email,
@@ -238,6 +356,7 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
 def request_otp(data: RegisterRequest, db: Session = Depends(get_db)):
     channel = _to_channel(data.channel)
     realm = _register_effective_realm(data)
+    _require_signup_tokens(data)
 
     user = _user_by_email_realm(db, str(data.email), realm)
     if user and _is_registration_complete(user) and user.password_hash:
@@ -248,6 +367,11 @@ def request_otp(data: RegisterRequest, db: Session = Depends(get_db)):
 
     password_hash = hash_password(data.password)
     credit_union_id = _credit_union_id_from_signup_payload(db, data)
+    if credit_union_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired credit union invitation. Request a new link from your credit union.",
+        )
     if user:
         user.name = data.name
         user.phone = data.phone
@@ -347,11 +471,16 @@ def verify_otp(data: RegisterVerifyRequest, db: Session = Depends(get_db)):
     if channel == OtpChannel.sms:
         user.is_phone_verified = True
     mit = (data.member_invite_token or "").strip()
+    apc = (data.approval_claim_code or "").strip()
     if mit:
-        inv, cu = _member_invite_and_cu(db, mit, str(data.email))
+        inv, cu = _member_invite_and_cu(db, mit, str(data.email), user.name, user.phone)
         user.credit_union_id = cu.id
         inv.used_at = datetime.utcnow()
         inv.used_by_user_id = user.id
+    elif apc:
+        user.credit_union_id = _validate_approval_for_registration(
+            db, apc, str(data.email), user.name, user.phone
+        )
     elif data.cu_signup_token and data.cu_signup_token.strip():
         cu = db.query(CreditUnion).filter(
             CreditUnion.signup_token == data.cu_signup_token.strip(),
@@ -360,6 +489,8 @@ def verify_otp(data: RegisterVerifyRequest, db: Session = Depends(get_db)):
         if cu:
             user.credit_union_id = cu.id
     db.commit()
+    db.refresh(user)
+    _require_customer_credit_union(user)
 
     sub = _token_subject(user)
     access = create_access_token(sub)
@@ -388,6 +519,14 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
         user = matches[0]
     if not _is_registration_complete(user):
         raise HTTPException(status_code=403, detail="Complete OTP verification before login")
+
+    role_val = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if (
+        eff_realm == AUTH_REALM_CARSCU
+        and role_val == UserRole.customer.value
+        and user.credit_union_id is None
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_ORPHAN_MEMBER_LOGIN)
 
     if _legacy_null_user_should_be_cu_realm(user, data.auth_realm):
         # One-time auto-heal: persist realm so future logins are deterministic.

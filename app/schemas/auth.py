@@ -63,6 +63,11 @@ class RegisterRequest(BaseModel):
         max_length=128,
         description="One-time personal invite from CU staff; takes precedence over cu_signup_token.",
     )
+    approval_claim_code: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        description="Pre-approval reference from CU; ties signup to that approval when no invite token.",
+    )
     # Omit only for legacy clients; server uses AUTH_REALM_LEGACY_DEFAULT (see settings).
     auth_realm: Optional[AuthRealm] = None
 
@@ -78,6 +83,7 @@ class RegisterVerifyRequest(BaseModel):
     channel: str = Field(default="email", pattern="^(email|sms)$")
     cu_signup_token: Optional[str] = Field(default=None, max_length=128)
     member_invite_token: Optional[str] = Field(default=None, max_length=128)
+    approval_claim_code: Optional[str] = Field(default=None, max_length=64)
     auth_realm: Optional[AuthRealm] = None
 
     @field_validator("auth_realm", mode="before")
