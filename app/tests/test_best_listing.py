@@ -68,7 +68,8 @@ def _seed_inventory_schema(engine):
                 (1, 1, 'VINNEW1', 'new', NULL, NULL, NULL, 42000, 2025, 'Honda', 'Civic', 'Sport', '{}', '[]', 'active', '2026-01-03'),
                 (2, 1, 'VINUSED1', 'used', 'cpo', 32000, 24999, NULL, 2022, 'Honda', 'Accord', 'EX', '{}', '["https://example.com/car.jpg"]', 'active', '2026-01-02'),
                 (3, 1, 'VINMISMATCH1', 'used', 'new', 10, 39350, 39350, 2025, 'Acura', 'ADX', 'A-Spec Package', '{}', '[]', 'active', '2026-01-04'),
-                (4, 1, 'VINZEROUSED1', 'used', 'used', 0, 38995, 40995, 2026, 'Acura', 'Integra', 'A-Spec', '{}', '[]', 'active', '2026-01-05')
+                (4, 1, 'VINZEROUSED1', 'used', 'used', 0, 38995, 40995, 2026, 'Acura', 'Integra', 'A-Spec', '{}', '[]', 'active', '2026-01-05'),
+                (5, 1, 'VINFEED1', 'new', 'new', 10, 30095, NULL, 2026, 'Hyundai', 'IONIQ 5', 'SEL', '{}', '[]', 'active', '2026-01-06')
                 """
             )
         )
@@ -101,9 +102,17 @@ def test_inventory_query_vehicle_type_filters_and_fields():
             build_inventory_query(engine, {"vehicle_type": "used", "max_mileage": 20000})
         ).fetchall()
         audi_rows = conn.execute(build_inventory_query(engine, {"vehicle_type": "all", "make": "Audi"})).fetchall()
+        feed_new_price_cap = conn.execute(
+            build_inventory_query(engine, {"vehicle_type": "new", "max_price": 999999})
+        ).fetchall()
+        feed_new_listed_only = conn.execute(
+            build_inventory_query(engine, {"vehicle_type": "new", "max_price": 35000})
+        ).fetchall()
 
-    assert len(all_rows) == 4
-    assert len(new_rows) == 3
+    assert len(all_rows) == 5
+    assert len(new_rows) == 4
+    assert {r._mapping.get("vin") for r in feed_new_price_cap} >= {"VINFEED1"}
+    assert {r._mapping.get("vin") for r in feed_new_listed_only} == {"VINFEED1"}
     assert len(used_rows) == 1
     assert len(used_price_filtered) == 0
     assert len(used_condition_filtered) == 1

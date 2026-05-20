@@ -24,6 +24,7 @@ from app.services.legacy_tables import (
     build_inventory_count_query,
     build_inventory_query,
     is_feed_csv_listing,
+    query_active_feed_new_vins,
     serialize_photos,
 )
 from app.services.make_normalization import canonicalize_make
@@ -169,6 +170,55 @@ def _vins_with_lease_monthly_in_db(db: Session) -> list[str]:
         .all()
         if r[0]
     ]
+
+
+def _lease_special_search_vins(db: Session) -> list[str]:
+    """Union of sheet/broker offer VINs and active feed-new VINs for lease-specials inventory pulls."""
+    offer_vins = set(_vins_with_lease_monthly_in_db(db))
+    feed_vins = set(query_active_feed_new_vins(engine))
+    return sorted(offer_vins | feed_vins)
+
+
+def _lease_special_new_price(
+    *,
+    msrp_value: Optional[float],
+    discounted_value: Optional[float],
+    listed_price_value: Optional[float],
+) -> Optional[float]:
+    """Price basis for lease payment estimates; feed rows often only have listed_price."""
+    price = resolve_price("new", msrp_value, discounted_value, listed_price_value)
+    if price is not None:
+        return float(price)
+    if listed_price_value is not None:
+        return float(listed_price_value)
+    if msrp_value is not None:
+        return float(msrp_value)
+    return None
+
+
+def _visible_for_lease_specials(
+    *,
+    mapping: dict,
+    offer_out: Optional[dict],
+    estimated_monthly: Optional[float],
+) -> bool:
+    """Sheet/broker offers keep existing rules; feed listings may appear with an estimated payment."""
+    if offer_out:
+        return True
+    return is_feed_csv_listing(mapping.get("carfax_url")) and estimated_monthly is not None
+
+
+def _lease_special_offer_for_response(
+    *,
+    mapping: dict,
+    offer_out: Optional[dict],
+    estimated_monthly: Optional[float],
+) -> Optional[dict]:
+    if offer_out:
+        return offer_out
+    if not is_feed_csv_listing(mapping.get("carfax_url")) or estimated_monthly is None:
+        return None
+    return {"monthly_payment": float(estimated_monthly)}
 
 
 def _resolve_offer_for_vehicle(
@@ -491,12 +541,31 @@ def inventory_filters(
                 offer_map=offer_map,
                 ymm_offer_map=ymm_offer_map,
             )
+            row_vehicle_type = (mapping.get("vehicle_type") or "").strip().lower()
             offer_out = apply_offer_visibility(
                 offer,
-                (mapping.get("vehicle_type") or "").strip().lower(),
-                require_monthly_payment=offers_only,
+                row_vehicle_type,
+                require_monthly_payment=True,
             )
-            if not offer_out:
+            msrp_val = float(mapping.get("msrp")) if mapping.get("msrp") is not None else None
+            listed_val = float(mapping.get("listed_price")) if mapping.get("listed_price") is not None else None
+            discounted_val = (
+                float(offer.discounted_price) if offer and offer.discounted_price is not None else None
+            )
+            est_monthly = None
+            if row_vehicle_type == "new":
+                price = _lease_special_new_price(
+                    msrp_value=msrp_val,
+                    discounted_value=discounted_val,
+                    listed_price_value=listed_val,
+                )
+                if price is not None:
+                    est_monthly = round(estimate_monthly_payment(price * 1.10, 6.99, 72, 0.0), 2)
+            if not _visible_for_lease_specials(
+                mapping=mapping,
+                offer_out=offer_out,
+                estimated_monthly=est_monthly,
+            ):
                 continue
         raw_make = _clean_filter_text(make_value)
         raw_model = _clean_filter_text(model_value)
@@ -587,6 +656,10 @@ def search_inventory(
     # instead of the Python-side payment filter path (which only scanned ~200 rows and capped totals).
     if max_payment is not None and float(max_payment) >= 10000:
         max_payment = None
+    # Same sentinel for max_price=999999 ("Any"). Feed CSV rows often have listed_price but NULL msrp;
+    # leaving max_price set would apply `msrp <= N` and drop those listings in SQL.
+    if max_price is not None and float(max_price) >= 999999:
+        max_price = None
     if response is not None:
         _set_edge_cache_headers(response)
     cache_key = _cache_key_from_params(
@@ -648,7 +721,7 @@ def search_inventory(
     }
     lease_special_vins: list[str] = []
     if offers_only:
-        lease_special_vins = _vins_with_lease_monthly_in_db(db)
+        lease_special_vins = _lease_special_search_vins(db)
         if lease_special_vins:
             filters = {**filters, "vin_in": lease_special_vins}
     # Broad lease-specials (no Y/M/M filter): UI groups by lineup client-side and needs many rows across brands.
@@ -763,15 +836,21 @@ def search_inventory(
         listed_price_value,
     ) -> Optional[float]:
         vt = str(vehicle_type_value or "").lower()
-        price = resolve_price(vehicle_type_value, msrp_value, discounted_value, listed_price_value)
-        if price is None:
-            return None
         if vt == "new":
+            price = _lease_special_new_price(
+                msrp_value=msrp_value,
+                discounted_value=discounted_value,
+                listed_price_value=listed_price_value,
+            )
+            if price is None:
+                return None
             taxed_price = float(price) * 1.10
             return round(estimate_monthly_payment(taxed_price, float(apr), int(term_months), float(down_payment)), 2)
         if vt == "used":
-            base = float(price)
-            return round(estimate_monthly_payment(base, float(apr), int(term_months), float(down_payment)), 2)
+            price = resolve_price(vehicle_type_value, msrp_value, discounted_value, listed_price_value)
+            if price is None:
+                return None
+            return round(estimate_monthly_payment(float(price), float(apr), int(term_months), float(down_payment)), 2)
         return None
 
     for row in rows:
@@ -789,13 +868,26 @@ def search_inventory(
             ymm_offer_map=ymm_offer_map,
         )
         offer_out = apply_offer_visibility(offer, row_vehicle_type, require_monthly_payment=offers_only)
-        if offers_only and not offer_out:
-            continue
         estimated_monthly = _estimated_monthly_for_values(
             vehicle_type_value=row_vehicle_type,
             msrp_value=float(mapping.get("msrp")) if mapping.get("msrp") is not None else None,
             discounted_value=float(offer.discounted_price) if offer and offer.discounted_price is not None else None,
             listed_price_value=float(mapping.get("listed_price")) if mapping.get("listed_price") is not None else None,
+        )
+        if offers_only and not _visible_for_lease_specials(
+            mapping=mapping,
+            offer_out=offer_out,
+            estimated_monthly=estimated_monthly,
+        ):
+            continue
+        lease_offer_out = (
+            _lease_special_offer_for_response(
+                mapping=mapping,
+                offer_out=offer_out,
+                estimated_monthly=estimated_monthly,
+            )
+            if offers_only
+            else offer_out
         )
         score = None
         make_value = mapping.get("make")
@@ -835,7 +927,7 @@ def search_inventory(
                 or None,
                 listing_url=mapping.get("listing_url"),
                 carfax_url=mapping.get("carfax_url"),
-                offer=OfferOverrideOut(**offer_out) if offer_out else None,
+                offer=OfferOverrideOut(**lease_offer_out) if lease_offer_out else None,
                 model_scores=ModelScoreOut(
                     design=score.design,
                     performance=score.performance,

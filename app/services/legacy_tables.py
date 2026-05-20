@@ -84,16 +84,24 @@ def _best_listing_subquery(listings: Table, filters: Dict[str, Any]) -> ColumnEl
 
     max_price = filters.get("max_price")
     if max_price is not None and effective_vehicle_type_col is not None:
+        new_price_col = None
+        if msrp_col is not None and listed_price_col is not None:
+            new_price_col = func.coalesce(msrp_col, listed_price_col)
+        elif msrp_col is not None:
+            new_price_col = msrp_col
+        elif listed_price_col is not None:
+            new_price_col = listed_price_col
+
         if vehicle_type_filter == "used" and listed_price_col is not None:
             query = query.where(listed_price_col <= max_price)
-        elif vehicle_type_filter == "new" and msrp_col is not None:
-            query = query.where(msrp_col <= max_price)
+        elif vehicle_type_filter == "new" and new_price_col is not None:
+            query = query.where(new_price_col <= max_price)
         else:
             price_checks = []
             if listed_price_col is not None:
                 price_checks.append(and_(effective_vehicle_type_col == "used", listed_price_col <= max_price))
-            if msrp_col is not None:
-                price_checks.append(and_(effective_vehicle_type_col == "new", msrp_col <= max_price))
+            if new_price_col is not None:
+                price_checks.append(and_(effective_vehicle_type_col == "new", new_price_col <= max_price))
             if price_checks:
                 query = query.where(or_(*price_checks))
 
@@ -294,6 +302,40 @@ def build_inventory_count_query(engine: Engine, filters: Dict[str, Any]):
 def is_feed_csv_listing(carfax_url: Any) -> bool:
     """Feed-sourced rows use this sentinel; they may carry many more photo URLs than scraped listings."""
     return str(carfax_url or "").strip().lower() == "feed_csv"
+
+
+def query_active_feed_new_vins(engine: Engine) -> List[str]:
+    """Distinct VINs for active new inventory ingested via feed (carfax_url = feed_csv)."""
+    tables = load_legacy_tables(engine)
+    listings = tables["vehicle_listings"]
+    vin_col = _column_or_none(listings, "vin")
+    carfax_col = _column_or_none(listings, "carfax_url")
+    status_col = _column_or_none(listings, "status")
+    if vin_col is None or carfax_col is None:
+        return []
+
+    effective_type_col = _normalized_vehicle_type_expr(listings)
+    vehicle_type_col = _column_or_none(listings, "vehicle_type")
+
+    query = select(func.distinct(vin_col)).select_from(listings).where(
+        func.lower(func.trim(carfax_col)) == "feed_csv",
+        vin_col.is_not(None),
+    )
+    if status_col is not None:
+        query = query.where(func.lower(func.trim(status_col)) == "active")
+    if effective_type_col is not None:
+        query = query.where(effective_type_col == "new")
+    elif vehicle_type_col is not None:
+        query = query.where(func.lower(vehicle_type_col) == "new")
+
+    with engine.connect() as conn:
+        return sorted(
+            {
+                str(row[0]).strip().upper()
+                for row in conn.execute(query).fetchall()
+                if row and row[0]
+            }
+        )
 
 
 def serialize_photos(raw: Any, *, max_photos: Optional[int] = 5) -> List[str]:
