@@ -9,7 +9,7 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.email import EmailDeliveryError, send_email
 from app.models.lead_request import LeadRequest
-from app.services.ghl_contacts import create_ghl_contact_for_lead, lookup_ghl_contact_for_credit_payload
+from app.services.ghl_contacts import create_ghl_contact_for_lead
 
 logger = logging.getLogger(__name__)
 
@@ -87,37 +87,15 @@ def _update_lead_delivery_state(lead_id: Optional[int], **fields: Any) -> None:
 
 
 def process_new_lead_integrations(payload: Dict[str, Any]) -> None:
-    """
-    After a lead is stored: sync to GoHighLevel, then send the Make/webhook only if the contact
-    was not already in GHL (email or phone match). If GHL is not configured or lookup errors,
-    the webhook is still sent when enabled (same as before for those cases).
-    """
-    lead_id = payload.get("lead_id")
+    """After a lead is stored: sync to GoHighLevel (when configured), then send the Make/webhook."""
     lead_source = payload.get("source")
     trade_in_lead = is_trade_in_source(lead_source)
 
-    existing_id, gh_status = lookup_ghl_contact_for_credit_payload(payload)
-    contact_already_in_ghl = gh_status == "found" and bool(existing_id)
-
     create_ghl_contact_for_lead(payload)
 
-    webhook_enabled = is_lead_webhook_enabled()
     if trade_in_lead:
         send_trade_in_email_notification(payload)
-    if not webhook_enabled:
-        return
-
-    if contact_already_in_ghl and not trade_in_lead:
-        _update_lead_delivery_state(
-            lead_id,
-            webhook_status="skipped",
-            webhook_last_error="Contact already exists in GoHighLevel; webhook not sent.",
-        )
-        logger.info(
-            "Lead webhook skipped (GHL contact already exists) lead_id=%s ghl_contact_id=%s",
-            lead_id,
-            existing_id,
-        )
+    if not is_lead_webhook_enabled():
         return
 
     webhook_payload = build_trade_in_webhook_payload(payload) if trade_in_lead else payload

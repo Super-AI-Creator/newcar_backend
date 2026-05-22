@@ -122,17 +122,11 @@ def test_send_lead_webhook_retries_then_succeeds(monkeypatch):
     assert calls[0][2]["X-Webhook-Secret"] == "abc123"
 
 
-def test_process_new_lead_integrations_skips_webhook_when_ghl_contact_exists(monkeypatch):
+def test_process_new_lead_integrations_sends_webhook_even_when_ghl_contact_exists(monkeypatch):
     prior_url = settings.lead_webhook_url
     settings.lead_webhook_url = "https://hook.example.test/lead"
     webhook_calls = []
-    state_updates = []
 
-    monkeypatch.setattr(
-        lead_delivery,
-        "lookup_ghl_contact_for_credit_payload",
-        lambda _p: ("contact-ghl-1", "found"),
-    )
     monkeypatch.setattr(
         lead_delivery,
         "create_ghl_contact_for_lead",
@@ -143,23 +137,15 @@ def test_process_new_lead_integrations_skips_webhook_when_ghl_contact_exists(mon
         "send_lead_webhook",
         lambda p: webhook_calls.append(p),
     )
-    monkeypatch.setattr(
-        lead_delivery,
-        "_update_lead_delivery_state",
-        lambda *args, **kwargs: state_updates.append((args, kwargs)),
-    )
+    monkeypatch.setattr(lead_delivery, "_update_lead_delivery_state", lambda *args, **kwargs: None)
 
     try:
         lead_delivery.process_new_lead_integrations({"lead_id": 5, "email": "a@b.com", "phone": "3105551212"})
     finally:
         settings.lead_webhook_url = prior_url
 
-    assert webhook_calls == []
-    assert any(
-        kwargs.get("webhook_status") == "skipped"
-        and "GoHighLevel" in (kwargs.get("webhook_last_error") or "")
-        for _a, kwargs in state_updates
-    )
+    assert len(webhook_calls) == 1
+    assert webhook_calls[0]["lead_id"] == 5
 
 
 def test_process_new_lead_integrations_sends_webhook_when_contact_not_in_ghl(monkeypatch):
@@ -167,11 +153,6 @@ def test_process_new_lead_integrations_sends_webhook_when_contact_not_in_ghl(mon
     settings.lead_webhook_url = "https://hook.example.test/lead"
     webhook_calls = []
 
-    monkeypatch.setattr(
-        lead_delivery,
-        "lookup_ghl_contact_for_credit_payload",
-        lambda _p: (None, "not_found"),
-    )
     monkeypatch.setattr(
         lead_delivery,
         "create_ghl_contact_for_lead",
