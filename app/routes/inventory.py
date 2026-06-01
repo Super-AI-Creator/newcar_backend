@@ -525,7 +525,22 @@ def inventory_filters(
 
     models_by_make: dict[str, set[str]] = {}
     trims_by_make_model: dict[str, set[str]] = {}
+    years_set: set[int] = set()
+    years_by_make: dict[str, set[int]] = {}
     makes_set: set[str] = set()
+
+    def _collect_year(make_key: Optional[str], year_value) -> None:
+        if year_value is None:
+            return
+        try:
+            year_int = int(year_value)
+        except (TypeError, ValueError):
+            return
+        if year_int <= 0:
+            return
+        years_set.add(year_int)
+        if make_key:
+            years_by_make.setdefault(make_key, set()).add(year_int)
 
     for row in rows:
         mapping = row._mapping
@@ -575,6 +590,8 @@ def inventory_filters(
             continue
         makes_set.add(make_key)
         models_by_make.setdefault(make_key, set()).add(model_key)
+        if vehicle_type == "used":
+            _collect_year(make_key, mapping.get("year"))
         if trim_value is not None and str(trim_value).strip():
             combo_key = f"{make_key}|||{model_key}"
             trims_by_make_model.setdefault(combo_key, set()).add(str(trim_value).strip())
@@ -605,6 +622,8 @@ def inventory_filters(
             continue
         makes_set.add(make_key)
         models_by_make.setdefault(make_key, set()).add(model_value)
+        if vehicle_type == "used":
+            _collect_year(make_key, row.year)
         if trim_value:
             combo_key = f"{make_key}|||{model_value}"
             trims_by_make_model.setdefault(combo_key, set()).add(trim_value)
@@ -621,6 +640,12 @@ def inventory_filters(
         "trims": trims,
         "models_by_make": models_by_make_sorted,
         "trims_by_make_model": trims_by_make_model_sorted,
+        "years": sorted(years_set, reverse=True) if vehicle_type == "used" else [],
+        "years_by_make": (
+            {key: sorted(values, reverse=True) for key, values in years_by_make.items()}
+            if vehicle_type == "used"
+            else {}
+        ),
     }
     _filters_cache_set(cache_key, payload)
     set_shared_json(_FILTERS_SHARED_CACHE_NAMESPACE, cache_key, payload, _SHARED_CACHE_TTL_SECONDS)

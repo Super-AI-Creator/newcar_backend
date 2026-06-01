@@ -69,7 +69,8 @@ def _seed_inventory_schema(engine):
                 (2, 1, 'VINUSED1', 'used', 'cpo', 32000, 24999, NULL, 2022, 'Honda', 'Accord', 'EX', '{}', '["https://example.com/car.jpg"]', 'active', '2026-01-02'),
                 (3, 1, 'VINMISMATCH1', 'used', 'new', 10, 39350, 39350, 2025, 'Acura', 'ADX', 'A-Spec Package', '{}', '[]', 'active', '2026-01-04'),
                 (4, 1, 'VINZEROUSED1', 'used', 'used', 0, 38995, 40995, 2026, 'Acura', 'Integra', 'A-Spec', '{}', '[]', 'active', '2026-01-05'),
-                (5, 1, 'VINFEED1', 'new', 'new', 10, 30095, NULL, 2026, 'Hyundai', 'IONIQ 5', 'SEL', '{}', '[]', 'active', '2026-01-06')
+                (5, 1, 'VINFEED1', 'new', 'new', 10, 30095, NULL, 2026, 'Hyundai', 'IONIQ 5', 'SEL', '{}', '[]', 'active', '2026-01-06'),
+                (6, 1, 'VINHIGHMI1', 'new', 'new', 1500, 28000, 30000, 2024, 'Hyundai', 'Kona', 'SEL', '{}', '[]', 'active', '2026-01-07')
                 """
             )
         )
@@ -108,20 +109,29 @@ def test_inventory_query_vehicle_type_filters_and_fields():
         feed_new_listed_only = conn.execute(
             build_inventory_query(engine, {"vehicle_type": "new", "max_price": 35000})
         ).fetchall()
+        high_mile_used = conn.execute(
+            build_inventory_query(engine, {"vehicle_type": "used", "make": "Hyundai", "model": "Kona"})
+        ).fetchall()
+        high_mile_new = conn.execute(
+            build_inventory_query(engine, {"vehicle_type": "new", "vin": "VINHIGHMI1"})
+        ).fetchall()
 
-    assert len(all_rows) == 5
+    assert len(all_rows) == 6
     assert len(new_rows) == 4
     assert {r._mapping.get("vin") for r in feed_new_price_cap} >= {"VINFEED1"}
     assert {r._mapping.get("vin") for r in feed_new_listed_only} == {"VINFEED1"}
-    assert len(used_rows) == 1
+    assert {r._mapping.get("vin") for r in high_mile_used} == {"VINHIGHMI1"}
+    assert high_mile_new == []
+    assert len(used_rows) == 2
     assert len(used_price_filtered) == 0
     assert len(used_condition_filtered) == 1
-    assert len(used_mileage_filtered) == 0
+    assert len(used_mileage_filtered) == 1
     assert all_rows[0]._mapping.get("vehicle_type") in {"new", "used"}
-    assert used_rows[0]._mapping.get("listed_price") == 24999
-    assert used_rows[0]._mapping.get("mileage") == 32000
-    assert used_rows[0]._mapping.get("condition") == "cpo"
-    assert used_rows[0]._mapping.get("photos") == '["https://example.com/car.jpg"]'
+    used_honda = next(r._mapping for r in used_rows if r._mapping.get("vin") == "VINUSED1")
+    assert used_honda.get("listed_price") == 24999
+    assert used_honda.get("mileage") == 32000
+    assert used_honda.get("condition") == "cpo"
+    assert used_honda.get("photos") == '["https://example.com/car.jpg"]'
 
     all_types = {row._mapping.get("vin"): row._mapping.get("vehicle_type") for row in all_rows}
     assert all_types["VINMISMATCH1"] == "new"

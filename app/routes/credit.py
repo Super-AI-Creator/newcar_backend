@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import ValidationError
 from sqlalchemy import String, case, func
 from sqlalchemy.orm import Session
 
@@ -20,6 +21,16 @@ from app.services.payments import estimate_monthly_payment, resolve_price
 from app.services.cu_member_scope import resolve_member_scope_user_id
 
 router = APIRouter(prefix="/credit", tags=["credit"])
+
+
+def _validate_credit_application_payload(raw: dict) -> dict:
+    try:
+        validated = PublicCreditApplicationIn.model_validate(raw)
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.errors()) from exc
+    if not validated.agreed_to_terms:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You must agree to terms before submitting.")
+    return validated.model_dump()
 
 
 def _viewer_is_super_admin(viewer: Optional[User]) -> bool:
@@ -75,7 +86,7 @@ def apply_credit(
 ):
     scoped_user_id = resolve_member_scope_user_id(db, user, member_user_id)
     raw = payload.payload_json if isinstance(payload.payload_json, dict) else {}
-    merged = enrich_payload_with_formatted(raw, mask_sensitive=False)
+    merged = enrich_payload_with_formatted(_validate_credit_application_payload(raw), mask_sensitive=False)
     app_row = CreditApplication(
         user_id=scoped_user_id,
         vin=payload.vin,

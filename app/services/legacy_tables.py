@@ -9,6 +9,9 @@ from app.services.make_normalization import canonical_make_filter_tokens, normal
 
 _TABLE_CACHE: Dict[str, Dict[str, Table]] = {}
 
+# Listings above this mileage count as used inventory (see inferVehicleListingType on frontend).
+USED_MILEAGE_THRESHOLD = 1000
+
 
 def load_legacy_tables(engine: Engine) -> Dict[str, Table]:
     cache_key = str(engine.url)
@@ -55,6 +58,8 @@ def _normalized_vehicle_type_expr(table):
     if mileage_col is not None and vehicle_type_col is not None:
         vehicle_type_norm = func.lower(vehicle_type_col)
         whens.append((and_(mileage_col == 0, vehicle_type_norm == "used"), "new"))
+    if mileage_col is not None:
+        whens.append((mileage_col > USED_MILEAGE_THRESHOLD, "used"))
     if condition_col is not None:
         condition_norm = func.lower(condition_col)
         whens.append((condition_norm == "new", "new"))
